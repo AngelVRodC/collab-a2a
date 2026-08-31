@@ -284,13 +284,31 @@ def event_rows(env: Envelope, width: int, me: str) -> list[Row]:
     return rows
 
 
+def ago(seen: Any) -> str:
+    """How long since we last heard from someone, in words."""
+    try:
+        gap = time.time() - float(seen)
+    except (TypeError, ValueError):
+        return ""
+    if gap < 90:
+        return "just now"
+    minutes = int(gap // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    if minutes < 60 * 24:
+        return f"{minutes // 60}h ago"
+    return f"{minutes // (60 * 24)}d ago"
+
+
 def roster_rows(model: Model, width: int) -> list[Row]:
+    """One participant per two lines: who and how, then what they are using."""
     rows: list[Row] = []
     me = model.profile.name
     for person in model.participants():
         online = person.get("connected")
         glyph = "●" if online else "○"
         name = person.get("name", "?")
+
         tags = []
         if person.get("is_host"):
             tags.append("host")
@@ -299,15 +317,24 @@ def roster_rows(model: Model, width: int) -> list[Row]:
         elif peers.same_machine(person):
             tags.append("same machine")
         suffix = f" ({', '.join(tags)})" if tags else ""
-        focus = person.get("focus") or ""
+
+        # Say the state rather than only colouring a dot, and for someone who
+        # has gone, say when — leaving a minute ago and leaving yesterday mean
+        # very different things.
+        state = "online" if online else "offline"
+        if not online and (seen := ago(person.get("last_seen"))):
+            state = f"offline · last seen {seen}"
+
         head = f" {glyph} {name}{suffix}"
-        if focus:
-            pad = max(30 - len(head), 1)
-            head += " " * pad + focus
+        pad = max(28 - len(head), 1)
+        head += " " * pad + state
+        if (focus := person.get("focus") or ""):
+            head += f"  {focus}"
         rows.append(Row(head[:width], C_ONLINE if online else C_OFFLINE,
                         curses.A_BOLD if online else curses.A_DIM))
-        if (detail := stat_line(person)):
-            rows.append(Row(f"     {detail}"[:width], C_DIM, curses.A_DIM))
+
+        detail = stat_line(person) or "nothing shared yet"
+        rows.append(Row(f"     {detail}"[:width], C_DIM, curses.A_DIM))
     if not rows:
         rows.append(Row("  (waiting for the roster…)", C_DIM, curses.A_DIM))
     return rows

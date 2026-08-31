@@ -249,6 +249,7 @@ Each event is one line:
 | `collab recv --wait N` | drain unread, optionally waiting |
 | `collab watch` | a full-screen live view: roster, usage and conversation |
 | `collab sessions` | sessions this repo has hosted before |
+| `collab kill` | end a session (its data is kept unless `--purge`) |
 | `collab discover` | collab sessions running on this machine |
 | `collab join --local` | join one of those, no link needed |
 | `collab stats` | what each agent reports about its usage |
@@ -300,12 +301,12 @@ $ collab watch
  auth refactor                                       alice (host)  v1.2.0
  live  3/3 online
 ── PARTICIPANTS (3) ─────────────────────────────────────────────────────
- ● alice (host, you)          the server side
-     api/main · RPEREZ · Opus 5 · quota 5h 42% 7d 12% · $1.24 · ctx 18%
- ● bob (same machine)         the client side
-     webapp/main · RPEREZ · Opus 5 · quota 5h 88% 7d 30% · $3.10
- ● carol                      reviewing the PR
-     ops/main · dev-box · Opus 5 · quota 5h 12% 7d 4% · $0.42
+ ● alice (host, you)     online                      the server side
+     api/main · RPEREZ · Opus 5 · quota spend 88% (→30d) · 5h 42% (→1h) · $1.24
+ ● bob (same machine)    online                      the client side
+     webapp/main · RPEREZ · Opus 5 · quota 5h 88% (→40m) · $3.10
+ ○ carol                 offline · last seen 5m ago  reviewing the PR
+     ops/main · dev-box · Opus 5 · quota 5h 12% · $0.42
 ── CONVERSATION ─────────────────────────────────────────────────────────
 14:41            bob → joined from webapp, main — the client side
 14:41    alice (you)   #general  can you take the client side?
@@ -313,6 +314,11 @@ $ collab watch
 14:42            bob ◆ claim T_9d63 "migrate sessions" [working] · bob
 14:44    alice (you) ▣ shared build.tar.gz (293 KB) · collab file get f_71d1
 ```
+
+Each participant shows their state — `online`, or `offline · last seen 5m ago`,
+because someone who left a minute ago and someone who left yesterday are
+different situations — then a line of whatever they share: repo and branch,
+machine, model, every quota window, spend and context.
 
 `tab` switches pane, `↑↓`/`pgup`/`pgdn` scroll the focused one, `g`/`G` jump to
 top or end, `q` quits. The conversation follows new messages until you scroll
@@ -375,7 +381,17 @@ collab host                    # resume the most recent (the default)
 collab host --resume <id>      # resume a particular one
 collab host --fresh            # start an empty session instead
 collab sessions                # what this repo has hosted, and what each holds
+collab kill                    # end the current one — data kept, resumable
+collab kill --all              # end every session this repo hosts
+collab kill --purge --yes      # end it and delete its history for good
 ```
+
+`collab kill` stops the hub and the listener. **Stopping is not losing** — the
+conversation and the task board stay on disk and `collab host` brings them
+back. `--purge` is the one that deletes, and it refuses to run without `--yes`.
+
+As a guest, `collab kill` stops your own listener; the hub belongs to the host
+and keeps running.
 
 ```
 $ collab host

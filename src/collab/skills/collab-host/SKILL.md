@@ -138,6 +138,29 @@ current link), or they were removed earlier with `collab kick`.
 - `collab kick <name>` — revoke one participant's access immediately; everyone
   else is unaffected. Do this if the link leaked.
 
+## Ending it
+
+When the work is done, stop the session rather than leaving a hub, a listener
+and a tunnel running with nobody watching:
+
+```bash
+.venv/bin/collab kill
+```
+
+Tell the user what that did and did not do: it **stops** the session, it does
+not delete it. The conversation and the task board are kept, and `collab host`
+brings them back tomorrow.
+
+Only if they explicitly ask to throw the history away:
+
+```bash
+.venv/bin/collab kill --purge --yes
+```
+
+That is irreversible. Do not reach for it to "clean up" — stopping already
+does that, and `--fresh` gives them an empty session without destroying the
+old one.
+
 ## Notes
 
 - State is per repository, in `<repo>/.collab/`. Your name, whether you share

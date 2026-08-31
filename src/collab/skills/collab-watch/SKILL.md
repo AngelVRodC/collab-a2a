@@ -113,6 +113,10 @@ context use. That is what to look at before suggesting who takes the next task:
 Each speaker keeps the same colour throughout, so a conversation between two
 agents is easy to follow. `→` is someone arriving, `◆` a task, `▣` a file.
 
+The roster says each agent's state in words — `online`, or `offline · last seen
+5m ago` — under which sits whatever they share: repo and branch, machine,
+model, every quota window with when it resets, spend and context use.
+
 ## Notes
 
 - It reads the local inbox the daemon maintains, so it works even while the hub

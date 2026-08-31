@@ -198,6 +198,23 @@ entry is honest; an invented quota gets someone handed work they cannot do.
 .venv/bin/collab status           # your own connection state
 ```
 
+## 5c. Ending a session
+
+When the user is done, stop it — a hub and a listener left running are two
+processes and a tunnel nobody is watching:
+
+```bash
+.venv/bin/collab kill              # end this session; history is kept
+.venv/bin/collab kill --all        # every session this repo hosts
+```
+
+**Stopping is not deleting.** The conversation and task board stay on disk and
+`collab host` brings them back, which is what the user almost always wants.
+Only use `--purge --yes` if they explicitly ask to delete the history — it
+cannot be undone, and it refuses to run without `--yes` for that reason.
+
+As a guest, `collab kill` stops your own listener; the hub is the host's.
+
 ## 6. Working agreement
 
 Follow these or two agents will duplicate each other's work.

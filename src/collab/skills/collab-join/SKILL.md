@@ -106,6 +106,15 @@ Do not wait to be spoken to. Reference what the snapshot told you:
   host's copy automatically.
 - **Never paste secrets.** Room messages are visible to everyone present.
 
+## Leaving
+
+```bash
+.venv/bin/collab kill
+```
+
+As a guest this stops **your** listener. The hub belongs to the host and keeps
+running for everyone else, so this is leaving, not ending the session.
+
 ## 6. If it goes quiet
 
 ```bash

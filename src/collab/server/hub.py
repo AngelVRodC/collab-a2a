@@ -192,6 +192,10 @@ class Hub:
                 "machine_id": p.meta.get("machine_id", ""),
                 "user": p.meta.get("user", ""),
                 "stats": p.meta.get("stats", {}),
+                # How long ago they were last heard from. A dot says whether
+                # someone is here; this says whether they only just left.
+                "last_seen": p.last_seen,
+                "joined_at": p.joined_at,
             })
         viewer_person = self.store.participant_by_id(viewer) if viewer else None
         return {

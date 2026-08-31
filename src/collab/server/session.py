@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 from dataclasses import asdict, dataclass
+from typing import Any
 from pathlib import Path
 
 from ..config import collab_home, ensure_home
@@ -167,6 +168,43 @@ def resume_session(cfg: HubConfig, port: int, bind: str = "127.0.0.1",
 
     cfg.save()
     return cfg
+
+
+def stop_session(cfg: HubConfig, *, purge: bool = False) -> dict[str, Any]:
+    """Stop a session's hub, and optionally delete what it held.
+
+    Processes are ended by the pid each one recorded, never by matching command
+    lines — a pattern like "collab.hub_main" also matches the shell you typed
+    it in, which is a good way to kill your own terminal.
+    """
+    import os
+    import shutil
+    import signal
+
+    result = {"session_id": cfg.session_id, "hub_stopped": False,
+              "daemon_stopped": False, "purged": False}
+
+    for label, pid in (("hub_stopped", cfg.pid),
+                       ("daemon_stopped", _daemon_pid(cfg))):
+        if not pid:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            result[label] = True
+        except (OSError, ProcessLookupError):
+            pass
+
+    if purge:
+        shutil.rmtree(cfg.dir, ignore_errors=True)
+        result["purged"] = True
+    return result
+
+
+def _daemon_pid(cfg: HubConfig) -> int:
+    try:
+        return int((cfg.dir / "daemon.pid").read_text().strip())
+    except (OSError, ValueError):
+        return 0
 
 
 def join_line(cfg: HubConfig) -> str:

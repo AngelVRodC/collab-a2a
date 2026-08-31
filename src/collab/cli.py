@@ -40,7 +40,8 @@ from .client.context import gather as ctx_gather
 from .protocol import (DEFAULT_ROOM, MAX_FILE_BYTES, Envelope, KIND_CHAT,
                        KIND_HELLO)
 from .server.session import (HubConfig, create_session, hosted_sessions,
-                             join_line, resume_session, session_summary)
+                             join_line, resume_session, session_summary,
+                             stop_session)
 from .server.tunnel import NO_NGROK_HELP, free_port, local_ip, ngrok_version
 
 # --- output helpers ----------------------------------------------------------
@@ -626,6 +627,64 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kill(args: argparse.Namespace) -> int:
+    """End a session: stop its hub and its listener.
+
+    Stopping is not losing. The conversation and the task board stay on disk
+    and `collab host` brings them back, unless --purge is given.
+    """
+    sessions = hosted_sessions()
+    if args.all:
+        targets = sessions
+    elif args.session_id:
+        targets = [c for c in sessions if c.session_id == args.session_id]
+        if not targets:
+            fail(f"no session {args.session_id!r} hosted in this repo")
+            print(dim("  `collab sessions` lists what is here"))
+            return 1
+    else:
+        current = SessionProfile.current()
+        targets = [c for c in sessions
+                   if current and c.session_id == current.session_id]
+        if not targets:
+            # Not the host of anything: at least stop our own listener.
+            if current is None:
+                fail("no active collab session in this repo")
+                return 1
+            stopped = stop_daemon(current)
+            ok(f"stopped listening to {current.session_id}"
+               if stopped else "nothing was running")
+            print(dim("  you are a guest here, so the hub belongs to "
+                      f"{current.host_name} and keeps running"))
+            return 0
+
+    if args.purge and not args.yes:
+        fail("--purge deletes the conversation and the task board for good")
+        print(dim("  re-run with --yes if that is really what you want"))
+        print(dim("  without --purge the session just stops and can be resumed"))
+        return 1
+
+    for cfg in targets:
+        counts = session_summary(cfg) if not args.purge else {}
+        result = stop_session(cfg, purge=args.purge)
+        what = []
+        if result["hub_stopped"]:
+            what.append("hub")
+        if result["daemon_stopped"]:
+            what.append("listener")
+        state = f"stopped {' and '.join(what)}" if what else "was not running"
+        ok(f"{c(cfg.session_id, '36')} — {state}"
+           + (" · data deleted" if result["purged"] else ""))
+        if not args.purge and counts:
+            kept = (f"{plural(counts.get('messages', 0), 'message')} and "
+                    f"{plural(counts.get('open_tasks', 0), 'open task')} kept")
+            print(f"       {dim(kept + ' — `collab host` brings it back')}")
+
+    if targets and not args.purge:
+        print(f"       {dim('delete it for good with: collab kill --purge --yes')}")
+    return 0
+
+
 def cmd_sessions(args: argparse.Namespace) -> int:
     """Previous sessions in this repo, and what resuming one would bring back."""
     found = hosted_sessions()
@@ -1067,6 +1126,17 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--resume", nargs="?", const=True, metavar="SESSION_ID",
                    help="resume a previous session (the most recent by default)")
     h.set_defaults(func=cmd_host)
+
+    kl = sub.add_parser("kill", help="end a session (its data is kept unless --purge)")
+    kl.add_argument("session_id", nargs="?",
+                    help="which session (default: the one you are in)")
+    kl.add_argument("--all", action="store_true",
+                    help="every session this repo hosts")
+    kl.add_argument("--purge", action="store_true",
+                    help="also delete its conversation and task board, for good")
+    kl.add_argument("--yes", "-y", action="store_true",
+                    help="required with --purge")
+    kl.set_defaults(func=cmd_kill)
 
     ss = sub.add_parser("sessions", help="sessions this repo has hosted before")
     ss.add_argument("--json", action="store_true")
