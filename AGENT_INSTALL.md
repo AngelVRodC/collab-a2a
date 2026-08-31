@@ -144,7 +144,24 @@ segment byte-for-byte, and writes a timestamped backup. `--agent tmux` and
 `--agent generic` cover other hosts. `collab statusline uninstall` removes only
 collab's block.
 
-## 9. If something is wrong
+## 9. Updating collab
+
+```bash
+cd collab-a2a && git pull && ./install.sh
+```
+
+Safe to re-run — it reuses `.venv` and re-installs the skills. Afterwards,
+restart anything long-lived, since it is still running the old code:
+
+```bash
+.venv/bin/collab daemon stop && .venv/bin/collab daemon start
+```
+
+If you are the host and the update touched the server, restart the hub too
+(`.venv/bin/collab host`). Tell the user their session link changes if they were
+on a free tunnel.
+
+## 10. If something is wrong
 
 ```bash
 .venv/bin/collab status          # state should say "live"
@@ -154,3 +171,11 @@ collab's block.
 
 `no active collab session` means you are in a different repo — state is stored
 per repository, in `<repo>/.collab/`.
+
+If the other side says the link stopped working, their free tunnel probably
+expired and returned on a new address. The hub relaunches it automatically and
+keeps the same tokens, so they only need to re-share the current link:
+
+```bash
+.venv/bin/collab url
+```

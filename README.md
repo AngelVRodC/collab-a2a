@@ -138,6 +138,32 @@ collab statusline install     # optional, see below
 .venv/bin/collab --help          # or: source .venv/bin/activate
 ```
 
+## Updating
+
+```bash
+cd collab-a2a
+git pull
+./install.sh
+```
+
+`install.sh` is safe to re-run: it reuses the existing `.venv`, upgrades the
+package in place, and re-installs the agent skills. Nothing about your sessions
+or settings is touched.
+
+Then, because long-lived processes keep running the old code:
+
+```bash
+collab daemon stop && collab daemon start   # if you are in a session
+```
+
+A running hub keeps serving the old version until it restarts, so the host
+should restart theirs (`collab host`) after updating if the update touches the
+server. The skills are symlinked, so they update with the pull; if you
+installed them with `--copy`, re-run `collab skills install --force`.
+
+If you also use the status bar, `collab statusline install` is idempotent —
+re-run it only if a release says the block changed.
+
 ## Quick start
 
 **Host:**
@@ -146,6 +172,15 @@ collab host --focus "refactoring auth"
 ```
 Prints one line to share. If `ngrok` is installed it is used automatically;
 otherwise you get the local URL plus instructions.
+
+The tunnel is supervised: a free ngrok tunnel that ends on its own is
+relaunched, and the session, its history and every issued token survive that
+untouched. Only the public address changes — `collab url` always prints the
+current link. To keep one address across restarts, pin a reserved domain:
+
+```bash
+collab host --domain your-name.ngrok-free.app
+```
 
 **Guest:**
 ```bash
@@ -391,6 +426,7 @@ Then hand out `<that-url>#<invite>` — `collab url` reprints the invite.
 
 | Symptom | Cause / fix |
 |---|---|
+| the public link stopped working | a free tunnel expired and came back on a **new address**. The hub notices and relaunches it, keeping the same session and tokens — run `collab url` for the current link and re-share it. `collab host --domain <reserved>.ngrok-free.app` pins an address that survives restarts |
 | `no active collab session` | you are in a different repo — state is per-repo; `collab status` shows where it looked |
 | status line shows `reconnecting…` | the daemon lost the hub; it retries with backoff. `collab daemon status` |
 | status line shows `offline` | the daemon is not running (`collab daemon start`) or you were removed |

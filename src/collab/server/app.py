@@ -37,6 +37,7 @@ from ..protocol import (
     KIND_FILE,
     KIND_HELLO,
     KIND_PRESENCE,
+    KIND_SYSTEM,
     KIND_TASK,
     REST_PREFIX,
     RPC_PATH,
@@ -48,6 +49,9 @@ from .events import event_stream
 from .executor import CollabAgentExecutor
 from .hub import Hub
 from .store import Store
+
+#: How often to confirm the tunnel is still forwarding.
+TUNNEL_CHECK_SECONDS = 15.0
 
 TASK_STATES = {
     "propose": "TASK_STATE_SUBMITTED",
@@ -86,9 +90,20 @@ def create_app(
     host_name: str,
     public_url: str,
     invite_code: str | None = None,
+    supervisor: Any | None = None,
+    on_url_change: Any | None = None,
 ) -> FastAPI:
     hub = Hub(store, session_id=session_id, host_name=host_name)
-    card = build_agent_card(public_url, session_id=session_id, host_name=host_name)
+
+    # The public URL can change under us: a free ngrok tunnel ends on its own
+    # and comes back on a different address. Everything that hands out a URL
+    # reads this rather than a value captured at startup.
+    current = {"url": public_url}
+
+    def live_url() -> str:
+        return current["url"]
+
+    card = build_agent_card(live_url(), session_id=session_id, host_name=host_name)
 
     app = FastAPI(
         title=f"collab hub · {session_id}",
@@ -97,6 +112,7 @@ def create_app(
     )
     app.state.hub = hub
     app.state.store = store
+    app.state.live_url = live_url
     app.state.session_id = session_id
     app.state.invite_code = invite_code
     app.state.started_at = time.time()
@@ -302,7 +318,7 @@ def create_app(
         return not record["recipient"] or who in (record["recipient"], record["sender"])
 
     def _download_url(file_id: str) -> str:
-        return f"{public_url.rstrip('/')}{EXT_PREFIX}/files/{file_id}/content"
+        return f"{live_url().rstrip('/')}{EXT_PREFIX}/files/{file_id}/content"
 
     @app.post(f"{EXT_PREFIX}/files", tags=["collab"])
     async def upload_file(request: Request, file: UploadFile = File(...),
@@ -419,6 +435,8 @@ def create_app(
             "status": "ok",
             "session_id": session_id,
             "host": host_name,
+            "url": live_url(),
+            "tunnel_restarts": getattr(supervisor, "restarts", 0),
             "connected": sorted(hub.connected()),
             "seq": store.max_seq(),
             "uptime_seconds": round(time.time() - app.state.started_at, 1),
@@ -430,14 +448,54 @@ def create_app(
     # enable_v0_3_compat accepts both dialects: the 1.0 names (SendMessage,
     # SubscribeToTask) and the 0.3 names (message/send, tasks/resubscribe) that
     # most A2A clients in the wild still speak.
+    async def with_current_url(c: Any) -> Any:
+        """Advertise wherever the hub is reachable *now*, not at startup."""
+        if c.supported_interfaces and c.supported_interfaces[0].url != live_url() + RPC_PATH:
+            fresh = build_agent_card(live_url(), session_id=session_id, host_name=host_name)
+            return fresh
+        return c
+
     add_a2a_routes_to_fastapi(
         app,
-        agent_card_routes=create_agent_card_routes(card, card_url=AGENT_CARD_WELL_KNOWN_PATH),
+        agent_card_routes=create_agent_card_routes(
+            card, card_modifier=with_current_url, card_url=AGENT_CARD_WELL_KNOWN_PATH
+        ),
         jsonrpc_routes=create_jsonrpc_routes(handler, rpc_url=RPC_PATH, enable_v0_3_compat=True),
         rest_routes=create_rest_routes(
             handler, enable_v0_3_compat=True, path_prefix=REST_PREFIX
         ),
     )
+
+    if supervisor is not None:
+        @app.on_event("startup")
+        async def _watch_tunnel() -> None:
+            async def loop() -> None:
+                while True:
+                    await asyncio.sleep(TUNNEL_CHECK_SECONDS)
+                    try:
+                        url, changed = await asyncio.to_thread(supervisor.ensure)
+                    except Exception:
+                        continue
+                    if not url or not changed:
+                        continue
+                    current["url"] = url
+                    if on_url_change is not None:
+                        await asyncio.to_thread(on_url_change, url)
+                    # Tell whoever is still connected. Anyone who was cut off
+                    # by the outage needs a fresh link from the host instead.
+                    await hub.publish(Envelope(
+                        kind=KIND_SYSTEM, sender="collab", room=DEFAULT_ROOM,
+                        text=f"the hub's public address changed to {url}",
+                        body={"event": "url-changed", "url": url},
+                    ))
+
+            app.state.tunnel_task = asyncio.create_task(loop())
+
+        @app.on_event("shutdown")
+        async def _stop_watching() -> None:
+            task = getattr(app.state, "tunnel_task", None)
+            if task is not None:
+                task.cancel()
 
     # Added last so it runs first: the routes above read request.user.
     app.add_middleware(

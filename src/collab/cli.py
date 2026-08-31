@@ -138,7 +138,7 @@ def cmd_host(args: argparse.Namespace) -> int:
     ensure_home()
     name = resolve_name(args.name)
     port = args.port or free_port()
-    cfg = create_session(name, port, bind=args.bind)
+    cfg = create_session(name, port, bind=args.bind, domain=args.domain)
 
     env = {**os.environ, "COLLAB_HOME": cfg.home}
     if args.no_tunnel:
@@ -514,6 +514,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         **{k: status.get(k) for k in
            ("state", "others_connected", "others_total", "unread", "last_seq")},
     }
+    if hint := status.get("hint"):
+        payload["hint"] = hint
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
@@ -522,6 +524,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "last_seq", "daemon_pid", "monitor_command", "monitor_ws"):
         if payload.get(key) is not None:
             print(f"  {key:<16} {payload[key]}")
+    if payload.get("hint"):
+        print(f"\n  {c(payload['hint'], '33')}")
     print(f"  {'state dir':<16} {profile.dir}")
     print()
     return 0
@@ -534,6 +538,9 @@ def cmd_url(args: argparse.Namespace) -> int:
         fail("only the host can print the invite line for a session")
         return 1
     print(join_line(cfg))
+    if cfg.tunnel == "ngrok" and not cfg.domain:
+        print(dim("  (a free tunnel gets a new address if it restarts — re-run this to "
+                  "get the current link, or use `collab host --domain` to pin one)"))
     return 0
 
 
@@ -666,6 +673,8 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--bind", default="127.0.0.1",
                    help="interface to bind; 0.0.0.0 exposes it on your LAN")
     h.add_argument("--focus", default="", help="what you are working on, shown to others")
+    h.add_argument("--domain", default="",
+                   help="a reserved ngrok domain, so the URL survives a tunnel restart")
     h.add_argument("--no-tunnel", action="store_true", help="skip ngrok even if installed")
     h.add_argument("--no-daemon", action="store_true", help="do not start listening")
     h.set_defaults(func=cmd_host)

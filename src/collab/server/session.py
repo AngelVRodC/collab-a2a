@@ -25,6 +25,9 @@ class HubConfig:
     host_token: str
     public_url: str = ""
     tunnel: str = "none"
+    #: A reserved ngrok domain, if one was given. Without it a restarted
+    #: tunnel comes back on a new address and invalidates shared links.
+    domain: str = ""
     pid: int = 0
     home: str = ""
 
@@ -69,7 +72,8 @@ def new_session_id() -> str:
     return "s_" + secrets.token_hex(4)
 
 
-def create_session(host_name: str, port: int, bind: str = "127.0.0.1") -> HubConfig:
+def create_session(host_name: str, port: int, bind: str = "127.0.0.1",
+                   domain: str = "") -> HubConfig:
     """Mint a session with fresh credentials and seed its store."""
     ensure_home()
     cfg = HubConfig(
@@ -79,6 +83,7 @@ def create_session(host_name: str, port: int, bind: str = "127.0.0.1") -> HubCon
         bind=bind,
         invite=new_secret(),
         host_token=new_secret(),
+        domain=domain,
     )
     cfg.save()
 

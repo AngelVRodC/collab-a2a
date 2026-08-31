@@ -95,6 +95,12 @@ SDK, not the docs):
 - The SDK's REST binding mounts a greedy `/{tenant}` at the root, so our routes
   are registered *before* it.
 
+## Releasing
+
+Bump the version in `pyproject.toml` and `src/collab/__init__.py`, tag it, and
+create a release. Do **not** move a tag that has already been published — cut
+the next patch version instead.
+
 ## Tests
 
 ```bash

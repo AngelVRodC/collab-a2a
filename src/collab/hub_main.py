@@ -1,7 +1,8 @@
 """The detached hub process: ``python -m collab.hub_main <session_id>``.
 
 Owns the tunnel as well as the server, so shutting the hub down takes the
-public URL with it rather than leaving a dangling tunnel.
+public URL with it rather than leaving a dangling tunnel — and so a tunnel that
+dies on its own can be brought back without disturbing the session.
 """
 
 from __future__ import annotations
@@ -15,7 +16,9 @@ import uvicorn
 from .server.app import create_app
 from .server.session import HubConfig
 from .server.store import Store
-from .server.tunnel import start_tunnel
+from .server.tunnel import TunnelSupervisor
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> int:
@@ -31,17 +34,32 @@ def main() -> int:
 
     cfg.pid = os.getpid()
 
-    tunnel = None
+    supervisor = None
     if os.environ.get("COLLAB_NO_TUNNEL") != "1":
-        tunnel = start_tunnel(cfg.port, log_path=str(cfg.dir / "ngrok.log"))
-    if tunnel is not None:
-        cfg.public_url = tunnel.public_url
+        supervisor = TunnelSupervisor(
+            cfg.port,
+            log_path=str(cfg.dir / "ngrok.log"),
+            domain=cfg.domain or None,
+        )
+        supervisor.start()
+
+    if supervisor is not None and supervisor.public_url:
+        cfg.public_url = supervisor.public_url
         cfg.tunnel = "ngrok"
     else:
+        supervisor = None if supervisor is None else supervisor
         cfg.public_url = ""
         cfg.tunnel = "none"
     # Written before serving so `collab host` can print the real URL.
     cfg.save()
+
+    def remember_url(url: str) -> None:
+        """Persist a new public address so `collab url` stays correct."""
+        latest = HubConfig.load(cfg.session_id, cfg.home) or cfg
+        latest.public_url = url
+        latest.pid = os.getpid()
+        latest.save()
+        logger.warning("tunnel came back on a new address: %s", url)
 
     store = Store(cfg.db_path)
     app = create_app(
@@ -50,12 +68,14 @@ def main() -> int:
         host_name=cfg.host_name,
         public_url=cfg.public_url or cfg.local_url,
         invite_code=cfg.invite,
+        supervisor=supervisor,
+        on_url_change=remember_url,
     )
     try:
         uvicorn.run(app, host=cfg.bind, port=cfg.port, log_level="warning", access_log=False)
     finally:
-        if tunnel is not None:
-            tunnel.stop()
+        if supervisor is not None:
+            supervisor.stop()
         store.close()
     return 0
 

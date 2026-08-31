@@ -15,6 +15,8 @@ import logging
 import os
 import random
 import signal
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,6 +136,7 @@ class Daemon:
         self.connected_since: float | None = None
         self.snapshot: dict[str, Any] = {}
         self._http: httpx.AsyncClient | None = None
+        self.failures = 0
         self._stop = asyncio.Event()
 
     # --- status ---------------------------------------------------------------
@@ -156,10 +159,22 @@ class Daemon:
             "last_seq": self.inbox.last_seq(),
             "heartbeat": time.time(),
             "connected_since": self.connected_since,
+            "failures": self.failures,
+            "hint": self._hint(),
         }
         tmp = self.paths.status.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload))
         tmp.replace(self.paths.status)  # atomic: a reader never sees a half file
+
+    def _hint(self) -> str:
+        """Something actionable once retrying has clearly stopped helping."""
+        if self.state == "unauthorized":
+            return "you were removed from the session, or it was recreated — ask for a new link"
+        if self.state == "reconnecting" and self.failures >= 8 and not self.profile.is_host:
+            return ("the hub has been unreachable for a while — if the host is using a free "
+                    "tunnel its address may have changed, so ask them for a fresh link "
+                    "(`collab url` on their side)")
+        return ""
 
     async def _heartbeat_loop(self) -> None:
         last_refresh = 0.0
@@ -183,6 +198,53 @@ class Daemon:
                 self.snapshot = r.json()
         except httpx.HTTPError:
             pass
+
+    def _follow_url_change(self) -> None:
+        """Pick up a new public address the hub recorded while we were away.
+
+        A restarted free tunnel comes back on a different URL. The host writes
+        the new one to hub.json, so the host's own listener can follow it
+        without anybody re-sharing a link.
+        """
+        from ..server.session import HubConfig
+
+        cfg = HubConfig.load(self.profile.session_id, self.profile.home)
+        if cfg is None:
+            return
+        wanted = cfg.public_url or cfg.local_url
+        if wanted and wanted != self.profile.url:
+            logger.warning("hub address changed to %s", wanted)
+            self.profile.url = wanted
+            self.profile.save()
+
+    def _revive_hub_if_host(self) -> None:
+        """Restart our own hub if it died — same session, same tokens.
+
+        Only the host can do this: it is the one holding the session database,
+        so relaunching it keeps every invite and participant token valid rather
+        than forcing everyone to rejoin.
+        """
+        if not self.profile.is_host:
+            return
+        from ..server.session import HubConfig
+
+        cfg = HubConfig.load(self.profile.session_id, self.profile.home)
+        if cfg is None or not cfg.pid:
+            return
+        try:
+            os.kill(cfg.pid, 0)
+            return  # still alive; this is a network problem, not a dead hub
+        except (OSError, ProcessLookupError):
+            pass
+
+        logger.warning("hub process %s is gone; restarting it", cfg.pid)
+        log = (self.paths.root / "hub.log").open("a")
+        subprocess.Popen(
+            [sys.executable, "-m", "collab.hub_main", cfg.session_id],
+            stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ, "COLLAB_HOME": cfg.home},
+        )
 
     # --- the feed --------------------------------------------------------------
 
@@ -227,6 +289,9 @@ class Daemon:
                 except Exception as exc:  # any drop is a reconnect, not a crash
                     self.state = "reconnecting"
                     self.connected_since = None
+                    self.failures += 1
+                    self._follow_url_change()
+                    self._revive_hub_if_host()
                     self.write_status()
                     logger.warning("feed dropped (%s); retrying in %.1fs", exc, backoff)
                     # Jitter keeps several agents from stampeding a restarted hub.
@@ -254,6 +319,7 @@ class Daemon:
             source.response.raise_for_status()
             self.state = "live"
             self.connected_since = time.time()
+            self.failures = 0
             self.write_status()
 
             async for event in source.aiter_sse():
