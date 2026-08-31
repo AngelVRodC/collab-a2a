@@ -101,3 +101,120 @@ def test_sender_can_withdraw_a_file(client, session, host_headers):
                          headers=host_headers).status_code == 200
     assert client.get(f"/ext/collab/v1/files/{record['id']}/content",
                       headers=bob).status_code == 404
+
+
+# --- a display name is not identity -------------------------------------------
+#
+# Access is decided on participant ids. Only the sender side was ever an
+# accidental lockout: delete_file compared raw names, while _may_touch resolved
+# them, and resolve_name falls back to participant_names -- so a freed but
+# unclaimed name still reached its old owner. The recipient test below is a
+# regression guard for the SPEC section 9 promise, not a bug reproduction; it
+# passes on the pre-change code too. The other three carry the change.
+
+
+def _rename(client, headers, name):
+    r = client.post("/ext/collab/v1/rename", json={"name": name}, headers=headers)
+    assert r.status_code == 200, r.text
+    return r
+
+
+def test_the_recipient_can_still_download_after_renaming_themselves(
+        client, session, host_headers):
+    bob = _join(client, session, "bob")
+    record = _upload(client, host_headers, b"secret", name="key.pem", to="bob").json()
+
+    _rename(client, bob, "bob2")
+
+    down = client.get(f"/ext/collab/v1/files/{record['id']}/content", headers=bob)
+    assert down.status_code == 200, "a rename must not lock you out of your own file"
+    assert down.content == b"secret"
+    assert client.post(f"/ext/collab/v1/files/{record['id']}/ack",
+                       headers=bob).status_code == 200
+
+
+def test_the_sender_can_still_withdraw_after_renaming_themselves(
+        client, session, host_headers):
+    # The sender is a plain participant, not the host -- otherwise the host
+    # bypass in delete_file would pass this test whatever the id check did.
+    bob = _join(client, session, "bob")
+    _join(client, session, "carol")
+    record = _upload(client, bob, b"oops", name="wrong.bin", to="carol").json()
+
+    _rename(client, bob, "bob2")
+
+    assert client.delete(f"/ext/collab/v1/files/{record['id']}",
+                         headers=bob).status_code == 200
+
+
+def test_claiming_a_freed_name_inherits_none_of_its_files(client, session, host_headers):
+    bob = _join(client, session, "bob")
+    record = _upload(client, host_headers, b"secret", name="key.pem", to="bob").json()
+    _rename(client, bob, "bob2")
+
+    # The name "bob" is free again, and whoever takes it must inherit nothing.
+    eve = _join(client, session, "bob")
+
+    assert client.get(f"/ext/collab/v1/files/{record['id']}/content",
+                      headers=eve).status_code == 403
+    assert client.get("/ext/collab/v1/files", headers=eve).json()["files"] == []
+    assert client.post(f"/ext/collab/v1/files/{record['id']}/ack",
+                       headers=eve).status_code == 403
+
+
+def test_a_file_with_no_ids_is_refused_to_everyone_but_the_host(
+        client, session, host_headers):
+    """A row written before the id columns cannot prove its two ends."""
+    bob = _join(client, session, "bob")
+    carol = _join(client, session, "carol")
+    record = _upload(client, bob, b"legacy", name="old.bin", to="carol").json()
+
+    store = session["store"]
+    with store._lock:
+        store._db.execute(
+            "UPDATE files SET sender_id=NULL, recipient_id=NULL WHERE id=?",
+            (record["id"],),
+        )
+        store._db.commit()
+
+    # Even the real recipient is refused -- guessing at the ends is the bug.
+    assert client.get(f"/ext/collab/v1/files/{record['id']}/content",
+                      headers=carol).status_code == 403
+    assert client.get("/ext/collab/v1/files", headers=carol).json()["files"] == []
+    # The host is the one exception: the blob is on their own disk.
+    assert client.get(f"/ext/collab/v1/files/{record['id']}/content",
+                      headers=host_headers).status_code == 200
+
+
+def test_acking_a_legacy_file_does_not_broadcast_it_on_replay(
+        client, session, host_headers):
+    """An addressed envelope with no id is private live and public on replay.
+
+    ``hub._entitled`` accepts ``to`` or ``to_id``; ``store._visible_to`` reads
+    ``recipient_id`` alone and treats an empty one as room-wide. So a reply
+    envelope whose ``to_id`` fell back to ``""`` reaches almost nobody live and
+    then everybody through ``/history``. The only row with no ``sender_id`` is
+    one predating the id columns, and the host bypass is what makes it ackable.
+    """
+    bob = _join(client, session, "bob")
+    carol = _join(client, session, "carol")
+    dave = _join(client, session, "dave")
+    record = _upload(client, bob, b"legacy", name="severance.pdf", to="carol").json()
+
+    store = session["store"]
+    with store._lock:
+        store._db.execute(
+            "UPDATE files SET sender_id=NULL, recipient_id=NULL WHERE id=?",
+            (record["id"],),
+        )
+        store._db.commit()
+
+    assert client.post(f"/ext/collab/v1/files/{record['id']}/ack",
+                       headers=host_headers).status_code == 200
+
+    seen = client.get("/ext/collab/v1/history", headers=dave).json()["events"]
+    assert not any("severance.pdf" in str(e) for e in seen), \
+        "a private transfer must not surface to a third party on replay"
+    # The sender still learns their file landed.
+    mine = client.get("/ext/collab/v1/history", headers=bob).json()["events"]
+    assert any("severance.pdf" in str(e) for e in mine)

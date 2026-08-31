@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS files (
     sha256     TEXT NOT NULL,
     sender     TEXT NOT NULL,
     recipient  TEXT,
+    sender_id    TEXT,
+    recipient_id TEXT,
     room       TEXT,
     created_at REAL NOT NULL,
     acked_at   REAL,
@@ -127,6 +129,9 @@ def _ensure_columns(db: sqlite3.Connection, table: str,
 def _migrate(db: sqlite3.Connection) -> None:
     """Bring an existing database up to the schema this version expects."""
     _ensure_columns(db, "events", {"sender_id": "TEXT", "recipient_id": "TEXT"})
+    # No back-fill: a row written before these columns cannot prove who its two
+    # ends were, so it stays NULL and the route fails it closed.
+    _ensure_columns(db, "files", {"sender_id": "TEXT", "recipient_id": "TEXT"})
 
 
 def token_hash(token: str) -> str:
@@ -468,12 +473,17 @@ class Store:
     # --- shared files -----------------------------------------------------------
 
     def add_file(self, file_id: str, *, name: str, size: int, sha256: str, sender: str,
-                 recipient: str | None, room: str | None) -> dict[str, Any]:
+                 recipient: str | None, room: str | None,
+                 sender_id: str, recipient_id: str | None) -> dict[str, Any]:
+        # The ids are required, not defaulted: they are what authorization reads,
+        # and a default is how the next caller silently re-opens the hole.
         with self._lock:
             self._db.execute(
-                "INSERT INTO files (id,name,size,sha256,sender,recipient,room,created_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (file_id, name, size, sha256, sender, recipient, room, time.time()),
+                "INSERT INTO files"
+                " (id,name,size,sha256,sender,recipient,sender_id,recipient_id,room,created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (file_id, name, size, sha256, sender, recipient,
+                 sender_id, recipient_id, room, time.time()),
             )
             self._db.commit()
             row = self._db.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
@@ -484,19 +494,14 @@ class Store:
             row = self._db.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
         return dict(row) if row else None
 
-    def files(self, *, viewer: str | None = None, include_gone: bool = False) -> list[dict[str, Any]]:
+    def files(self, *, include_gone: bool = False) -> list[dict[str, Any]]:
         sql = "SELECT * FROM files"
         if not include_gone:
             sql += " WHERE state='available'"
         sql += " ORDER BY created_at DESC"
         with self._lock:
             rows = self._db.execute(sql).fetchall()
-        out = [dict(r) for r in rows]
-        if viewer is None:
-            return out
-        # A file addressed to someone is visible only to the two ends.
-        return [f for f in out
-                if not f["recipient"] or viewer in (f["recipient"], f["sender"])]
+        return [dict(r) for r in rows]
 
     def mark_file(self, file_id: str, state: str, *, acked_by: str | None = None) -> None:
         with self._lock:

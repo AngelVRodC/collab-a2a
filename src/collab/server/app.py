@@ -378,13 +378,18 @@ def create_app(
                 _blob(record["id"]).unlink()
             store.mark_file(record["id"], "expired")
 
-    def _may_touch(record: dict[str, Any], who: str) -> bool:
-        """Compare by id where we have one, so a rename cannot lock you out."""
-        if not record["recipient"]:
+    def _may_touch(record: dict[str, Any], who: str, *, is_host: bool = False) -> bool:
+        """Authorize by id, never by name — a name can change hands.
+
+        A row written before the id columns existed cannot prove who its two ends
+        were, so it is refused rather than guessed at.  The host is the exception:
+        the blob is on their disk and they can already withdraw it.
+        """
+        if not record["recipient"] and not record["recipient_id"]:
             return True
-        recipient_id = store.resolve_name(record["recipient"])
-        sender_id = store.resolve_name(record["sender"])
-        return who in (recipient_id, sender_id)
+        if not record["recipient_id"]:
+            return is_host
+        return who in (record["recipient_id"], record["sender_id"])
 
     def _download_url(file_id: str) -> str:
         return f"{live_url().rstrip('/')}{EXT_PREFIX}/files/{file_id}/content"
@@ -422,6 +427,7 @@ def create_app(
         record = await asyncio.to_thread(
             store.add_file, file_id, name=name, size=size, sha256=digest.hexdigest(),
             sender=user.name, recipient=to_name or None, room=room or DEFAULT_ROOM,
+            sender_id=user.id, recipient_id=to_id or None,
         )
         await hub.publish(Envelope(
             kind=KIND_FILE, sender=user.name, sender_id=user.id,
@@ -437,7 +443,7 @@ def create_app(
         user = _require(request)
         _sweep_expired()
         visible = [f for f in store.files()
-                   if _may_touch(f, user.id)]
+                   if _may_touch(f, user.id, is_host=user.is_host)]
         return {"files": [{**f, "download_url": _download_url(f["id"])}
                           for f in visible]}
 
@@ -447,7 +453,7 @@ def create_app(
         record = store.get_file(file_id)
         if record is None or record["state"] != "available":
             raise HTTPException(status_code=404, detail="no such file (it may already be collected)")
-        if not _may_touch(record, user.id):
+        if not _may_touch(record, user.id, is_host=user.is_host):
             raise HTTPException(status_code=403, detail="that file was not shared with you")
         path = _blob(file_id)
         if not path.exists():
@@ -463,7 +469,7 @@ def create_app(
         record = store.get_file(file_id)
         if record is None:
             raise HTTPException(status_code=404, detail="no such file")
-        if not _may_touch(record, user.id):
+        if not _may_touch(record, user.id, is_host=user.is_host):
             raise HTTPException(status_code=403, detail="that file was not shared with you")
         with contextlib.suppress(OSError):
             _blob(file_id).unlink()
@@ -471,7 +477,11 @@ def create_app(
         await hub.publish(Envelope(
             kind=KIND_FILE, sender=user.name, sender_id=user.id,
             to=record["sender"] if record["recipient"] else None,
-            to_id=store.resolve_name(record["sender"]) or "" if record["recipient"] else "",
+            # Addressing, not authorization: a row predating the id columns
+            # has no sender_id, and an addressed envelope with no id is
+            # private live but room-wide on replay.
+            to_id=((record["sender_id"] or store.resolve_name(record["sender"]) or "")
+                   if record["recipient"] else ""),
             room=None if record["recipient"] else record["room"],
             body={"action": "received", "id": file_id, "name": record["name"]},
         ))
@@ -483,7 +493,7 @@ def create_app(
         record = store.get_file(file_id)
         if record is None:
             raise HTTPException(status_code=404, detail="no such file")
-        if record["sender"] != user.name and not user.is_host:
+        if record["sender_id"] != user.id and not user.is_host:
             raise HTTPException(status_code=403, detail="only the sender or the host can withdraw a file")
         with contextlib.suppress(OSError):
             _blob(file_id).unlink()

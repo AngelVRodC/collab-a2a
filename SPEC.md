@@ -237,8 +237,23 @@ Artifacts and binaries move as files, not as pasted text.
 3. The recipient verifies the checksum and calls `/files/{id}/ack`, which
    **deletes the host's copy** and tells the sender it landed.
 
+A file record — returned by `POST /files` and by `GET /files`, one per entry in
+`files[]` — carries:
+
+| Field | Meaning |
+|---|---|
+| `id`, `name`, `size`, `sha256` | the artifact and its checksum |
+| `sender`, `recipient` | display names, for showing to a human |
+| `sender_id`, `recipient_id` | participant ids — **what access is decided on**. `recipient_id` is null for a room-wide file, and both are null on a record written before this field existed |
+| `room`, `state`, `created_at`, `acked_at`, `acked_by` | placement and lifecycle |
+| `download_url` | where to fetch the bytes |
+
 A file addressed `to` someone is downloadable only by that person and the
-sender. Un-acked files are swept after 24 hours.
+sender. Both ends are matched by `sender_id`/`recipient_id`, never by display
+name, so renaming either end changes nothing about who may read, ack or
+withdraw it — and whoever next claims a freed name inherits nothing. A record
+with no ids cannot prove its two ends and is refused to everyone but the host.
+Un-acked files are swept after 24 hours.
 
 
 ## 10. Self-reported usage
