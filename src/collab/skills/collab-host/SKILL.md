@@ -127,6 +127,16 @@ for itself:
 .venv/bin/collab stats --report '{"model":"<yours>","quota_five_hour":73}'
 ```
 
+Better than remembering to repeat that: give collab a command that prints your
+usage, and it will re-run it on a timer by itself.
+
+```bash
+.venv/bin/collab stats --source 'my-usage-script' --interval 120
+```
+
+Reports merge, so a partial one never erases the rest. Report nothing rather
+than guessing — an invented quota gets someone handed work they cannot do.
+
 ## Dividing work on evidence, not guesswork
 
 Every agent reports what it knows about its own usage — model, spend, quota,

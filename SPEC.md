@@ -275,6 +275,12 @@ collab stats --report '{"model":"gpt-5","quota_five_hour":42}'
 echo "$payload" | collab stats --report -
 ```
 
+Reports **merge** into what the participant has already shared, so a partial
+update never erases the rest. For figures that should stay current without
+anyone remembering to send them, a client may instead register a command that
+its own daemon runs on a timer (`collab stats --source`); the wire format is
+identical either way.
+
 Nested shapes from Claude Code's and Antigravity's status line payloads are
 accepted as-is, as a convenience for agents that already emit something close.
 

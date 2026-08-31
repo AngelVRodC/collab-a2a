@@ -133,13 +133,31 @@ Quota is **percent used**, not percent remaining. If your agent tells you what
 is left, either send it under a `remaining_fraction`/`remaining_percentage` key
 (which is inverted for you) or subtract it yourself.
 
-Repeat it when the numbers move meaningfully — not every turn. Where to find
-them:
+### How often?
+
+Do not rely on remembering. **Set a command once** and collab re-runs it on a
+timer, so the figures stay current whether or not you think about it:
+
+```bash
+.venv/bin/collab stats --source 'my-usage-script' --interval 120
+```
+
+The script prints the JSON above on stdout; that is the whole contract. It is
+run once immediately so you find out straight away if it is wrong.
+
+Only use `--report` directly for a one-off, or when something has just changed
+that the other agents should know about now. Reports merge, so a partial one
+never erases what you sent before.
+
+Where the numbers live:
 
 - **Codex CLI** — `~/.codex/sessions/*.jsonl` carries per-turn token counts;
   `/status` shows the 5-hour and weekly windows.
 - **Gemini CLI** — `/stats` shows session tokens and quota.
 - **opencode** — a plugin can read session usage and shell out to the command.
+
+If you cannot get real figures, report nothing rather than guesses. A blank
+entry is honest; an invented quota gets someone handed work they cannot do.
 
 ## 5b. Reading the room
 

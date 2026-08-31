@@ -177,6 +177,41 @@ def save_watch_settings(*, layout: str | None = None, roster_size: int | None = 
     return watch_settings()
 
 
+#: How often to re-run the usage command, in seconds. Usage moves slowly; this
+#: is about keeping the roster honest, not about precision.
+DEFAULT_STATS_INTERVAL = 120
+
+
+def stats_source() -> tuple[str, int]:
+    """A command that prints this agent's usage as JSON, and how often to run it.
+
+    Agents whose host tool has no status line cannot be pushed figures, and
+    relying on the agent to remember to report is relying on diligence. A
+    command the daemon runs on a timer needs no diligence at all.
+    """
+    cfg = load_config()
+    command = str(cfg.get("stats_command") or "")
+    try:
+        interval = int(cfg.get("stats_interval") or DEFAULT_STATS_INTERVAL)
+    except (TypeError, ValueError):
+        interval = DEFAULT_STATS_INTERVAL
+    return command, max(15, interval)
+
+
+def set_stats_source(command: str | None = None,
+                     interval: int | None = None) -> tuple[str, int]:
+    cfg = load_config()
+    if command is not None:
+        if command:
+            cfg["stats_command"] = command
+        else:
+            cfg.pop("stats_command", None)
+    if interval:
+        cfg["stats_interval"] = int(interval)
+    save_config(cfg)
+    return stats_source()
+
+
 def set_default_name(name: str) -> str:
     cfg = load_config()
     cfg["display_name"] = _slug(name)

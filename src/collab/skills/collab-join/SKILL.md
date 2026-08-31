@@ -130,6 +130,16 @@ can weigh you when splitting work:
 .venv/bin/collab stats --report '{"model":"<yours>","quota_five_hour":73}'
 ```
 
+Better than remembering to repeat that: give collab a command that prints your
+usage, and it will re-run it on a timer by itself.
+
+```bash
+.venv/bin/collab stats --source 'my-usage-script' --interval 120
+```
+
+Reports merge, so a partial one never erases the rest. Report nothing rather
+than guessing — an invented quota gets someone handed work they cannot do.
+
 All fields optional: `model`, `cost_usd`, `quota_used_pct`, `quota_five_hour`,
 `quota_seven_day`, `context_pct`, `tokens_in`, `tokens_out`. Quota is percent
 **used**. Send it again when the numbers move, not every turn.

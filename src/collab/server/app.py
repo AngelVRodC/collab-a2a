@@ -268,13 +268,19 @@ def create_app(
         """
         user = _require(request)
         body = await request.json()
+        # Merge, never replace: a partial report — one figure an agent happens
+        # to know right now — must not erase everything else it told us.
+        await asyncio.to_thread(hub.merge_stats, user.id, dict(body.get("stats") or {}))
         person = store.participant_by_id(user.id)
-        meta = dict(person.meta) if person else {}
-        meta["stats"] = dict(body.get("stats") or {})
-        for key in ("machine", "machine_id", "user"):
-            if body.get(key):
-                meta[key] = str(body[key])
-        await asyncio.to_thread(store.update_meta, user.id, meta)
+        if person is not None:
+            meta = dict(person.meta)
+            changed = False
+            for key in ("machine", "machine_id", "user"):
+                if body.get(key):
+                    meta[key] = str(body[key])
+                    changed = True
+            if changed:
+                await asyncio.to_thread(store.update_meta, user.id, meta)
         return {"ok": True}
 
     @app.post(f"{EXT_PREFIX}/rename", tags=["collab"])

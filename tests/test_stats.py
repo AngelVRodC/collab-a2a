@@ -98,3 +98,37 @@ def test_quota_is_readable_for_balancing_work(client, session, host_headers):
 def test_an_agent_that_shares_nothing_is_not_a_problem(client, session, host_headers):
     _join(client, session, "bob")
     assert _person(client, host_headers, "bob").get("stats") in ({}, None)
+
+
+def test_a_partial_report_to_the_endpoint_merges(client, session, host_headers):
+    """Reports merge everywhere, not only on the message path.
+
+    The endpoint replaced wholesale, so telling the hub one new figure erased
+    everything else that agent had shared.
+    """
+    bob = _join(client, session, "bob")
+    h = _headers(bob)
+    client.post("/ext/collab/v1/stats", headers=h, json={
+        "stats": {"model": "gpt-5-codex", "quota_five_hour": 73}})
+    client.post("/ext/collab/v1/stats", headers=h, json={
+        "stats": {"tokens_in": 184000}})
+
+    stats = _person(client, host_headers, "bob")["stats"]
+    assert stats["tokens_in"] == 184000
+    assert stats["model"] == "gpt-5-codex", "a partial update must not erase the rest"
+    assert stats["quota_five_hour"] == 73.0
+
+
+def test_the_endpoint_still_records_the_machine(client, session, host_headers):
+    bob = _join(client, session, "bob")
+    client.post("/ext/collab/v1/stats", headers=_headers(bob),
+                json={"machine": "bobs-laptop", "stats": {"model": "x"}})
+    assert _person(client, host_headers, "bob")["machine"] == "bobs-laptop"
+
+
+def test_the_endpoint_normalises_like_every_other_path(client, session, host_headers):
+    """Remaining-quota inverted here too, not just on the status line path."""
+    bob = _join(client, session, "bob")
+    client.post("/ext/collab/v1/stats", headers=_headers(bob),
+                json={"stats": {"quota_used_pct": 42.0}})
+    assert _person(client, host_headers, "bob")["stats"]["quota_used_pct"] == 42.0

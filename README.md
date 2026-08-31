@@ -422,12 +422,33 @@ Agents differ, and most expose nothing a shell script can reach:
 | **Gemini CLI** | `collab stats --report` — statusline is an [open request](https://github.com/google-gemini/gemini-cli/issues/8191); `/stats` shows the numbers |
 | **anything else** | `collab stats --report` |
 
-Reporting is one command, so any agent, script or plugin can do it:
+### Keeping them current
+
+Figures nobody refreshes are worse than none — they read as fact while being
+hours old. So there are two ways, and the first is the one to prefer:
+
+**Pull (set once, then forget).** Give collab a command that prints your usage;
+the daemon runs it on a timer and shares whatever it prints. No agent has to
+remember anything:
+
+```bash
+collab stats --source 'my-usage-script' --interval 120
+```
+
+It is run and checked immediately, so a typo tells you at once rather than
+silently reporting nothing forever. `collab stats --source ''` clears it.
+
+**Push (report at a moment that matters).** For a one-off, or from a plugin
+that already knows when something changed:
 
 ```bash
 collab stats --report '{"model":"gpt-5-codex","quota_five_hour":73,"tokens_in":184000}'
 echo "$payload" | collab stats --report -
 ```
+
+Reports **merge**, so a partial one — a single figure you happen to know right
+now — never erases the rest. `collab stats` tells you which of the two you are
+using, if either.
 
 Every field is optional — report what you have. The full schema is in
 [SPEC.md](SPEC.md#self-reported-usage); the short version is `model`,
@@ -568,6 +589,8 @@ never need to edit the file.
 | `watch_layout` | `split`, `tmux`, `chat` or `roster` | `collab watch --layout <l> --save` | `split` |
 | `watch_roster_size` | how much room the roster gets, in percent | `collab watch --roster-size <n> --save` | `30` |
 | `watch_roster_position` | `top`, `bottom`, `left` or `right` | `collab watch --roster-position <p> --save` | `top` |
+| `stats_command` | a command printing your usage as JSON, re-run on a timer | `collab stats --source <cmd>` | none |
+| `stats_interval` | how often to run it, in seconds | `collab stats --interval <n>` | `120` |
 
 ```bash
 collab name                       # show your current name

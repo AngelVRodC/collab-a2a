@@ -31,7 +31,9 @@ from .config import (
     set_default_name,
     save_watch_settings,
     set_share_stats,
+    set_stats_source,
     share_stats_enabled,
+    stats_source,
     watch_settings,
 )
 from .client.context import gather as ctx_gather
@@ -514,6 +516,30 @@ def cmd_stats(args: argparse.Namespace) -> int:
         ok("reported: " + ", ".join(f"{k}={v}" for k, v in figures.items()))
         return 0
 
+    if args.source is not None or args.interval:
+        command, interval = set_stats_source(
+            command=args.source, interval=args.interval)
+        if command:
+            ok(f"usage command set, re-run every {interval}s")
+            print(f"       {dim(command)}")
+            from . import stats as statmod
+            import subprocess as sp
+            try:
+                probe = sp.run(command, shell=True, capture_output=True,
+                               text=True, timeout=20)
+                figures = statmod.normalise(probe.stdout)
+            except (OSError, sp.SubprocessError):
+                figures = {}
+            if figures:
+                ok("it currently reports: "
+                   + ", ".join(f"{k}={v}" for k, v in figures.items()))
+            else:
+                warn("running it now produced nothing collab understands")
+                print(dim("       it must print a JSON object; see `collab stats --help`"))
+        else:
+            ok("usage command cleared")
+        return 0
+
     if args.share is not None:
         enabled = set_share_stats(args.share == "on")
         ok(f"sharing your usage is now {'on' if enabled else 'off'}")
@@ -559,6 +585,12 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print()
     print(dim(f"  you are {'sharing' if share_stats_enabled() else 'NOT sharing'} yours "
               "(collab stats --share on|off)"))
+    command, interval = stats_source()
+    if command:
+        print(dim(f"  yours refresh every {interval}s from: {command}"))
+    else:
+        print(dim("  yours are not refreshed automatically — set a command with "
+                  "`collab stats --source`, or report with `--report`"))
     print()
     return 0
 
@@ -1041,6 +1073,12 @@ def build_parser() -> argparse.ArgumentParser:
     stt.add_argument("--report", metavar="JSON",
                      help="report your own usage as a JSON object, or '-' for stdin "
                           "— this is how any agent shares figures")
+    stt.add_argument("--source", metavar="CMD",
+                     help="a shell command printing your usage as JSON; collab runs "
+                          "it on a timer so the figures stay current by themselves "
+                          "(pass '' to clear)")
+    stt.add_argument("--interval", type=int, metavar="SECONDS",
+                     help="how often to run --source (default 120)")
     add_session_flag(stt)
     stt.set_defaults(func=cmd_stats)
 

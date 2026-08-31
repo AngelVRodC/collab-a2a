@@ -26,7 +26,7 @@ import httpx
 from httpx_sse import aconnect_sse
 
 from .. import __version__, peers
-from ..config import SessionProfile, share_stats_enabled
+from ..config import SessionProfile, share_stats_enabled, stats_source
 from ..protocol import EXT_PREFIX, Envelope
 from .bridge import Bridge
 from .inbox import Inbox
@@ -142,6 +142,7 @@ class Daemon:
         self.snapshot: dict[str, Any] = {}
         self._http: httpx.AsyncClient | None = None
         self._last_stats: dict[str, Any] = {}
+        self._stats_ran_at = 0.0
         self.failures = 0
         self._stop = asyncio.Event()
 
@@ -215,6 +216,38 @@ class Daemon:
         except OSError:
             pass
 
+    async def _refresh_stats_from_command(self) -> None:
+        """Run the configured usage command and keep what it prints.
+
+        This is how an agent with no status line stays current without having
+        to remember anything: the figures are pulled, not pushed.
+        """
+        command, interval = stats_source()
+        if not command or not share_stats_enabled():
+            return
+        if (time.time() - self._stats_ran_at) < interval:
+            return
+        self._stats_ran_at = time.time()
+
+        from ..stats import normalise
+
+        def run() -> str:
+            try:
+                done = subprocess.run(command, shell=True, capture_output=True,
+                                      text=True, timeout=20)
+                return done.stdout if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                return ""
+
+        output = await asyncio.to_thread(run)
+        figures = normalise(output) if output else {}
+        if not figures:
+            return
+        try:
+            (self.paths.root / "agent_stats.json").write_text(json.dumps(figures))
+        except OSError:
+            pass
+
     async def _report_stats(self, client: httpx.AsyncClient) -> None:
         """Tell the hub where we are running, and what we know about our usage.
 
@@ -251,6 +284,7 @@ class Daemon:
             if (time.time() - last_refresh) > SNAPSHOT_REFRESH and self.state == "live":
                 if self._http is not None:
                     await self._refresh_snapshot(self._http)
+                    await self._refresh_stats_from_command()
                     await self._report_stats(self._http)
                 last_refresh = time.time()
             self.write_status()
