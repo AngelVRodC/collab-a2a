@@ -19,7 +19,8 @@ from typing import Any
 
 from . import __version__
 from .client import onboard
-from .client.daemon import DaemonPaths, is_running, read_status, stop as stop_daemon
+from .client.daemon import (DaemonPaths, is_running, read_status,
+                            stop as stop_daemon, stop_orphans)
 from .client.hub_client import HubClient, HubError
 from .client.inbox import Inbox
 from .config import (
@@ -189,6 +190,8 @@ def cmd_host(args: argparse.Namespace) -> int:
         is_host=True, room=DEFAULT_ROOM, home=cfg.home,
     )
     profile.save()
+    if orphans := stop_orphans(cfg.home, keep=cfg.session_id):
+        ok(f"stopped {len(orphans)} leftover session listener(s)")
     if args.focus:
         try:
             with HubClient(profile.url, profile.token) as client:
@@ -224,6 +227,8 @@ def cmd_join(args: argparse.Namespace) -> int:
         fail(str(exc))
         return 1
 
+    if orphans := stop_orphans(profile.home, keep=profile.session_id):
+        ok(f"stopped {len(orphans)} leftover session listener(s)")
     ok(f"joined {c(profile.session_id, '36')} as {c(profile.name, '1')}"
        f" (host: {profile.host_name})")
     if status.get("state") == "live":

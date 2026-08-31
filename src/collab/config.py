@@ -187,6 +187,17 @@ class SessionProfile:
             return None
 
     @classmethod
+    def load_from(cls, directory: Path) -> SessionProfile | None:
+        """Load a profile by its directory, without consulting the pointer."""
+        p = Path(directory) / "profile.json"
+        if not p.exists():
+            return None
+        try:
+            return cls(**json.loads(p.read_text()))
+        except (OSError, ValueError, TypeError):
+            return None
+
+    @classmethod
     def current(cls, cwd: Path | None = None) -> SessionProfile | None:
         pointer = current_pointer(cwd)
         if not pointer.exists():

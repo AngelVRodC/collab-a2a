@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from ..config import SessionProfile
-from ..client.daemon import read_status
+from ..client.daemon import is_running, read_status
 
 #: Beyond this, the daemon's heartbeat is old enough that it is not just quiet.
 STALE_AFTER = 10.0
@@ -90,6 +91,12 @@ def render(status: dict[str, Any] | None = None, *, width: int | None = None,
     if status is None:
         profile = SessionProfile.current(cwd)
         if profile is None:
+            return ""
+        # No live daemon means the session is over, not that it is offline.
+        # "offline" is for a daemon that is running but cannot reach the hub —
+        # something you can act on. A dead session should simply disappear
+        # instead of leaving a stale badge on the status line forever.
+        if is_running(profile) is None:
             return ""
         status = read_status(profile)
         if not status:
@@ -168,6 +175,23 @@ def status_payload(cwd: Path | None = None) -> dict[str, Any]:
     }
 
 
+def _read_stdin_if_ready(timeout: float = 0.15) -> str:
+    """Read piped session JSON, but never wait on a pipe that stays open.
+
+    Claude Code pipes its session JSON in; other hosts pipe nothing. Reading
+    unconditionally hangs whenever stdin is an inherited pipe that is never
+    closed — and a status line command that blocks stalls the whole bar, which
+    is the one thing this must not do. So only read when data is already there.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.closed or sys.stdin.isatty():
+            return ""
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        return sys.stdin.read() if ready else ""
+    except Exception:
+        return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     """Universal entry point: one short line on stdout, always exit 0.
 
@@ -185,13 +209,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cwd = Path(args.cwd) if args.cwd else None
     if cwd is None:
-        # Claude Code hands us the session JSON; other hosts pass nothing. A
-        # host that leaves stdin open must not stall or blank the segment.
-        try:
-            if not sys.stdin.isatty():
-                cwd = cwd_from_session_json(sys.stdin.read())
-        except Exception:
-            cwd = None
+        cwd = cwd_from_session_json(_read_stdin_if_ready())
 
     try:
         if args.plain:

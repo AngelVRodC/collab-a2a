@@ -92,3 +92,53 @@ def test_your_own_messages_are_not_unread(tmp_path):
 
     assert inbox.unread_count() == 2
     assert inbox.unread_count(exclude_sender="bob") == 1
+
+
+def test_segment_disappears_when_the_session_is_over(tmp_path, monkeypatch):
+    """A killed session must not leave 'offline' on the status line forever.
+
+    'offline' means a running daemon that cannot reach the hub — something the
+    user can act on. A dead session is not that; it should show nothing.
+    """
+    from collab import config
+    from collab.statusline import render as rmod
+
+    monkeypatch.setenv("COLLAB_HOME", str(tmp_path))
+    profile = config.SessionProfile(
+        session_id="s_dead", url="http://x", name="bob",
+        host_name="alice", token="t", home=str(tmp_path),
+    )
+    profile.save()
+    (profile.dir / "status.json").write_text(json.dumps({
+        "name": "bob", "host": "alice", "state": "live",
+        "others_connected": 1, "heartbeat": time.time() - 600,
+    }))
+
+    monkeypatch.setattr(rmod, "is_running", lambda p: None)      # daemon gone
+    assert rmod.render() == ""
+
+    monkeypatch.setattr(rmod, "is_running", lambda p: 1234)      # daemon alive
+    assert "offline" in rmod.render()
+
+
+def test_render_never_blocks_on_an_open_stdin_pipe():
+    """A status line command that hangs stalls the whole bar.
+
+    stdin is often an inherited pipe that nobody ever closes; reading it
+    unconditionally waits for an EOF that never comes.
+    """
+    import subprocess
+    import sys as _sys
+
+    proc = subprocess.Popen(
+        [_sys.executable, "-c",
+         "import sys;from collab.statusline.render import main;sys.exit(main([]))"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        # Deliberately never close stdin.
+        out, _ = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("render blocked on stdin instead of returning")
+    assert proc.returncode == 0

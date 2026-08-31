@@ -91,6 +91,28 @@ def stop(profile: SessionProfile) -> bool:
     return True
 
 
+def stop_orphans(home: Path | str, keep: str | None = None) -> list[str]:
+    """Stop daemons left over from earlier sessions in this repo.
+
+    A repo has one current session, so a daemon for any other one is an orphan
+    reconnecting forever to a hub that is not coming back. Without this they
+    accumulate across restarts.
+    """
+    sessions = Path(home) / "sessions"
+    if not sessions.is_dir():
+        return []
+    stopped = []
+    for child in sessions.iterdir():
+        if not child.is_dir() or child.name == keep:
+            continue
+        profile = SessionProfile.load_from(child)
+        if profile is None:
+            continue
+        if is_running(profile) is not None and stop(profile):
+            stopped.append(child.name)
+    return stopped
+
+
 def read_status(profile: SessionProfile) -> dict[str, Any]:
     p = DaemonPaths(profile.dir).status
     if not p.exists():
