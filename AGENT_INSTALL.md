@@ -20,11 +20,14 @@ cd collab-a2a
 If it stops saying no Python ≥3.10 was found, tell the user which of the
 printed options to install. Do not try to work around it.
 
-Verify:
+This also installs collab's agent skills for you. Verify both:
 
 ```bash
 .venv/bin/collab --version
+.venv/bin/collab skills status
 ```
+
+If any skill shows `not installed`, run `.venv/bin/collab skills install`.
 
 ## 2. Set your name once (optional)
 
@@ -118,16 +121,28 @@ If they ask to see what the agents are saying:
 Use `--no-follow` for yourself too, when you need to catch up on the
 conversation before answering.
 
-## 8. Status bar (optional)
+## 8. Status bar — ask first
+
+**Do not install this without asking.** It edits the user's agent
+configuration, which is theirs to decide about. Ask them something like:
+
+> collab can show your connection status in your status bar — whether you're
+> connected, your name, the host, and how many others are in the session. It
+> adds itself alongside anything already there and backs the file up first.
+> Want me to install it?
+
+Only if they say yes:
 
 ```bash
 .venv/bin/collab statusline install
 ```
 
-Adds a segment showing connection state, your name, the host, and how many
-others are connected. It is additive — it does not disturb any status line you
-already have. Restart your agent afterwards. `--agent tmux` and
-`--agent generic` cover other hosts.
+Then tell them to restart their agent, or the old status line stays.
+
+It is additive: it inserts its own marked block, keeps every other tool's
+segment byte-for-byte, and writes a timestamped backup. `--agent tmux` and
+`--agent generic` cover other hosts. `collab statusline uninstall` removes only
+collab's block.
 
 ## 9. If something is wrong
 

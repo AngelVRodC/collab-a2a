@@ -77,7 +77,15 @@ printf '%s[..]%s   installing collab and dependencies\n' "$c_dim" "$c_off"
 "$VENV/bin/python" -m pip install --quiet -e "$ROOT[dev]" || die "pip install failed (see output above)"
 ok "collab installed into .venv"
 
-# --- 4. optional tooling ------------------------------------------------------
+# --- 4. agent skills ----------------------------------------------------------
+# Always installed: they are how an agent knows how to use collab at all.
+if "$VENV/bin/collab" skills install >/dev/null 2>&1; then
+    ok "agent skills installed"
+else
+    warn "could not install the agent skills — run: .venv/bin/collab skills install"
+fi
+
+# --- 5. optional tooling ------------------------------------------------------
 if command -v ngrok >/dev/null 2>&1; then
     ok "ngrok detected  ${c_dim}($(ngrok version 2>/dev/null | head -1))${c_off} — sessions can be shared publicly"
 else
@@ -85,7 +93,7 @@ else
     printf '       %shttps://ngrok.com/download   (alternatives: cloudflared, tailscale funnel)%s\n' "$c_dim" "$c_off"
 fi
 
-# --- 5. done ------------------------------------------------------------------
+# --- 6. done ------------------------------------------------------------------
 cat <<MSG
 
 ${c_grn}Done.${c_off} Everything lives in .venv — collab is not installed globally.
@@ -98,4 +106,8 @@ Start a session and get a link to share:
 
 Join someone else's:
   ${c_dim}.venv/bin/collab join <url>#<invite>${c_off}
+
+Optional — show connection status in your agent's status bar
+(this edits your agent's config, so it is not done for you):
+  ${c_dim}.venv/bin/collab statusline install${c_off}
 MSG

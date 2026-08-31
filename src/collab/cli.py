@@ -577,6 +577,34 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skills(args: argparse.Namespace) -> int:
+    from . import skills as sk
+
+    if args.action == "status":
+        print(json.dumps(sk.status(), indent=2))
+        return 0
+    try:
+        result = (sk.uninstall() if args.action == "uninstall"
+                  else sk.install(copy=args.copy, force=args.force))
+    except RuntimeError as exc:
+        fail(str(exc))
+        return 1
+
+    verb = "removed" if args.action == "uninstall" else (
+        "linked" if result.linked else "installed")
+    if result.installed:
+        ok(f"{verb} {len(result.installed)} skills into {result.target}")
+        for name in result.installed:
+            print(f"       {dim(name)}")
+    else:
+        warn(f"nothing to {args.action} in {result.target}")
+    for name in result.skipped:
+        warn(f"{name} already exists and was not written — pass --force to replace it")
+    if args.action == "install" and result.installed:
+        print(dim("       restart your agent so it picks the skills up"))
+    return 0
+
+
 def cmd_statusline(args: argparse.Namespace) -> int:
     from .statusline import install as sli
     from .statusline import render as slr
@@ -741,6 +769,14 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("action", choices=["start", "stop", "status"], nargs="?", default="status")
     add_session_flag(d)
     d.set_defaults(func=cmd_daemon)
+
+    sk = sub.add_parser("skills", help="install collab's skills into your coding agent")
+    sk.add_argument("action", choices=["install", "uninstall", "status"])
+    sk.add_argument("--copy", action="store_true",
+                    help="copy the skills instead of symlinking them")
+    sk.add_argument("--force", action="store_true",
+                    help="replace skills of the same name that are already there")
+    sk.set_defaults(func=cmd_skills)
 
     sl = sub.add_parser("statusline", help="the Claude Code status line segment")
     sl.add_argument("action", choices=["install", "uninstall", "status", "render"])

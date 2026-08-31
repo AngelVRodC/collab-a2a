@@ -123,8 +123,16 @@ cd collab-a2a
 ```
 
 `install.sh` finds a Python ≥3.10 (trying `python3`, then `pyenv`), creates
-`.venv`, and installs into it. If no suitable Python exists it stops and tells
+`.venv`, installs into it, and installs the **agent skills** so your coding
+agent knows how to use collab. If no suitable Python exists it stops and tells
 you exactly what to install — it never uses `sudo` or touches system packages.
+
+The one thing it does *not* do for you is the status bar, since that edits your
+agent's own config:
+
+```bash
+collab statusline install     # optional, see below
+```
 
 ```bash
 .venv/bin/collab --help          # or: source .venv/bin/activate
@@ -203,7 +211,29 @@ Each event is one line:
 | `collab kick <name>` | remove one participant (host) |
 | `collab name [value]` | show or set your global display name |
 | `collab daemon start\|stop\|status` | manage the listener |
+| `collab skills install` | install the agent skills (done for you by `install.sh`) |
 | `collab statusline install` | add the status bar segment |
+
+## Agent skills
+
+`install.sh` installs three skills into your agent so it knows collab exists and
+how to drive it:
+
+| Skill | Fires when |
+|---|---|
+| `collab-host` | the user wants to open their work to another agent, or share a session |
+| `collab-join` | the user pastes a join link, or asks to connect to someone's agent |
+| `collab-watch` | the user wants to see the conversation, or asks for a pane to follow it |
+
+```bash
+collab skills status      # where they are and whether they're linked
+collab skills install     # re-run if you moved the checkout
+collab skills uninstall   # removes only collab's own skills
+```
+
+They are symlinked by default, so editing one in a checkout takes effect
+immediately; `--copy` installs real files instead. A skill of the same name that
+collab did not install is never overwritten without `--force`.
 
 ## Watching the conversation
 
