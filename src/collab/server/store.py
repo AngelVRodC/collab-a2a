@@ -131,8 +131,57 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.commit()
+
+    def _columns(self, table: str) -> set[str]:
+        return {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
+
+    def _migrate(self) -> None:
+        """Bring a database written by an older collab up to the current shape.
+
+        ``CREATE TABLE IF NOT EXISTS`` leaves an existing table exactly as it
+        was, so a session recorded before identity moved from names to ids has
+        no ``id`` column and every read of it fails. Sessions are meant to be
+        resumable — a conversation from last month should still open — so the
+        missing pieces are added and backfilled rather than the session being
+        written off.
+        """
+        now = time.time()
+
+        # Identity used to be the display name. Give everyone an id, and record
+        # the name they hold so references to it still resolve.
+        people = self._columns("participants")
+        if people and "id" not in people:
+            self._db.execute("ALTER TABLE participants ADD COLUMN id TEXT")
+            for row in self._db.execute("SELECT name FROM participants").fetchall():
+                pid = new_participant_id()
+                self._db.execute(
+                    "UPDATE participants SET id=? WHERE name=?", (pid, row["name"]))
+                self._db.execute(
+                    "INSERT OR REPLACE INTO participant_names"
+                    " (name, participant_id, claimed_at) VALUES (?,?,?)",
+                    (row["name"], pid, now),
+                )
+
+        # Events carried names only. Resolve them to the ids just assigned, so
+        # old direct messages stay visible to exactly the two people involved.
+        events = self._columns("events")
+        if events:
+            added = [col for col in ("sender_id", "recipient_id")
+                     if col not in events]
+            for col in added:
+                self._db.execute(f"ALTER TABLE events ADD COLUMN {col} TEXT")
+            if added:
+                self._db.execute(
+                    "UPDATE events SET sender_id = (SELECT participant_id FROM"
+                    " participant_names WHERE name = events.sender)"
+                    " WHERE sender_id IS NULL")
+                self._db.execute(
+                    "UPDATE events SET recipient_id = (SELECT participant_id FROM"
+                    " participant_names WHERE name = events.recipient)"
+                    " WHERE recipient_id IS NULL AND recipient IS NOT NULL")
 
     def close(self) -> None:
         with self._lock:
