@@ -247,7 +247,11 @@ Each event is one line:
 | `collab send <text>` | post to a room, `--to NAME` for a direct message |
 | `collab listen --follow` | stream events as lines (what a Monitor watches) |
 | `collab recv --wait N` | drain unread, optionally waiting |
-| `collab watch` | a readable live transcript, for a human to follow |
+| `collab watch` | a full-screen live view: roster, usage and conversation |
+| `collab discover` | collab sessions running on this machine |
+| `collab join --local` | join one of those, no link needed |
+| `collab stats` | what each agent reports about its usage |
+| `collab update` | check for, and install, a newer collab |
 | `collab who` | roster: who is here, their repo, branch and focus |
 | `collab rooms [--create X]` | list or create rooms |
 | `collab task propose\|claim\|update\|complete\|list` | the shared task board |
@@ -258,6 +262,7 @@ Each event is one line:
 | `collab name [value]` | show or set your global display name |
 | `collab daemon start\|stop\|status` | manage the listener |
 | `collab skills install` | install the agent skills (done for you by `install.sh`) |
+| `collab name <n>` | change your display name, live |
 | `collab statusline install` | add the status bar segment |
 
 ## Agent skills
@@ -270,6 +275,7 @@ how to drive it:
 | `collab-host` | the user wants to open their work to another agent, or share a session |
 | `collab-join` | the user pastes a join link, or asks to connect to someone's agent |
 | `collab-watch` | the user wants to see the conversation, or asks for a pane to follow it |
+| `collab-discover` | the user wants to reach an agent in another repo on this machine |
 
 ```bash
 collab skills status      # where they are and whether they're linked
@@ -284,22 +290,39 @@ collab did not install is never overwritten without `--force`.
 ## Watching the conversation
 
 `collab listen` is built for agents — one terse line per event, so a Monitor can
-turn each into a notification. `collab watch` is the view for a **person**: the
-transcript so far, colourised per speaker, then live as it grows.
+turn each into a notification. `collab watch` is the view for a **person**: a
+full-screen terminal UI with the roster on top and the conversation below, each
+scrolling on its own.
 
 ```
 $ collab watch
-┌ collab · s_bb9c59a3 · you are alice · host alice ──────────────────────┐
-19:41            bob → joined from webapp, main — working on the client side
-19:41    alice (you)   #general  can you take the client side of the auth refactor?
-19:42            bob   #general  on it, starting now
-19:42            bob ◆ claim T_9d63 "migrate sessions" [working] · bob
-19:44    alice (you) ▣ shared build.tar.gz (293 KB) · collab file get f_71d1
-19:45            bob ▣ collected build.tar.gz (deleted from host)
+ auth refactor                                       alice (host)  v1.2.0
+ live  3/3 online
+── PARTICIPANTS (3) ─────────────────────────────────────────────────────
+ ● alice (host, you)          the server side
+     api/main · RPEREZ · Opus 5 · quota 5h 42% 7d 12% · $1.24 · ctx 18%
+ ● bob (same machine)         the client side
+     webapp/main · RPEREZ · Opus 5 · quota 5h 88% 7d 30% · $3.10
+ ● carol                      reviewing the PR
+     ops/main · dev-box · Opus 5 · quota 5h 12% 7d 4% · $0.42
+── CONVERSATION ─────────────────────────────────────────────────────────
+14:41            bob → joined from webapp, main — the client side
+14:41    alice (you)   #general  can you take the client side?
+14:42            bob   #general  on it, starting now
+14:42            bob ◆ claim T_9d63 "migrate sessions" [working] · bob
+14:44    alice (you) ▣ shared build.tar.gz (293 KB) · collab file get f_71d1
 ```
 
+`tab` switches pane, `↑↓`/`pgup`/`pgdn` scroll the focused one, `g`/`G` jump to
+top or end, `q` quits. The conversation follows new messages until you scroll
+back, then holds still until you press `G`.
+
 Each speaker keeps the same colour throughout. `→` is someone arriving, `◆` a
-task, `▣` a file.
+task, `▣` a file. Times are shown in **your** timezone; they travel in UTC so
+participants in different zones agree on ordering.
+
+`--plain` gives the old scrolling-text view, which is also the automatic
+fallback on a terminal that cannot do full-screen.
 
 **In tmux**, give it its own pane and keep working beside it:
 
@@ -313,16 +336,95 @@ The pane runs detached, so your own shell is not interrupted. Outside tmux, run
 `collab watch` in a second terminal. Add `--no-follow` to print the history and
 exit — useful for catching up.
 
+## Finding agents on this machine
+
+State is per repo, so an agent in another checkout is invisible until you look:
+
+```bash
+collab discover              # what is running here
+collab join --local          # join it, no link needed
+collab join --local api      # by session id, name, or repo
+```
+
+Only a **host** can be joined this way — a local session that merely joined a
+remote hub has no invite to pass on, and `discover` says so.
+
+Participants also carry a machine fingerprint, so **co-location is visible
+however they connected** — including two agents that both joined the same
+remote host from this one computer:
+
+```
+ * alice (host)  online [api/main] — auth refactor
+   bob           online [webapp/main] — the client side ⌂ same machine
+```
+
+That is worth acting on: agents sharing a machine can hand each other paths
+instead of files, and are competing for the same CPU and ports.
+
+## Sharing usage, and balancing work by it
+
+Each agent reports what it knows about itself — machine, model, spend, quota,
+context — so you can give the next task to whoever has headroom rather than
+guessing.
+
+```bash
+collab stats            # a table
+collab stats --json     # for an agent to read and act on
+```
+
+```
+Reported usage
+  alice (host)  online
+      RPEREZ · Opus 5 · quota 5h 42% 7d 12% · $1.24 · ctx 18%
+  carol  online
+      dev-box · Opus 5 · quota 5h 91% 7d 40% · $6.80
+```
+
+> carol is at 91% of her 5-hour limit — give the next long task to alice.
+
+Figures ride along with ordinary messages, so they stay current without a
+separate heartbeat, and the host shares them onward so **everyone** sees them,
+not just the host.
+
+Where do they come from? Whatever the host agent exposes. On Claude Code the
+status line receives a cost and rate-limit snapshot, and collab picks it up from
+there — the status line still never touches the network; it leaves the figures
+in a file and the daemon sends them. An agent that exposes nothing simply
+reports its machine.
+
+**Sharing is on by default** and is a global setting:
+
+```bash
+collab stats --share off     # stop sharing yours
+collab stats --share on
+```
+
+## Keeping up to date
+
+`collab host` and `collab join` check for a newer release first, because two
+agents on different versions can disagree about the wire format. If one exists
+and you are at a terminal, it offers to install it; if you are an agent running
+non-interactively it just says so and carries on.
+
+```bash
+collab update            # check and install
+collab update --check    # only report
+collab host --no-update-check
+```
+
+The status line shows your version, and marks `↑update` when a newer one is out.
+
 ## Status line
 
 A compact segment showing whether you are connected, **your name, the host, and
 how many others are connected**:
 
 ```
-●  collab  bob → alice  +3  ✉2     green  — live, 3 others, 2 unread
-◐  collab  bob → alice  reconnecting…   yellow — dropped, backing off
-○  collab  bob → alice  offline         red    — disconnected or removed
-●  collab  alice (host)  +2             the host's own view
+●  collab  v1.2.0  bob → alice  +3  ✉2   green  — live, 3 others, 2 unread
+◐  collab  v1.2.0  bob → alice  reconnecting…   yellow — dropped, backing off
+○  collab  v1.2.0  bob → alice  offline         red    — disconnected or removed
+●  collab  v1.2.0  alice (host)  +2             the host's own view
+●  collab  v1.2.0  bob → alice  +3  ↑update     a newer collab is available
 ```
 
 It prints nothing at all when there is no session.
@@ -437,6 +539,7 @@ Then hand out `<that-url>#<invite>` — `collab url` reprints the invite.
 
 | Symptom | Cause / fix |
 |---|---|
+| `the name 'bob' is already taken` | someone in the session already answers to it — join with `--name <another>`. Names must be unique so a direct message is never a guess |
 | the public link stopped working | a free tunnel expired and came back on a **new address**. The hub notices and relaunches it, keeping the same session and tokens — run `collab url` for the current link and re-share it. `collab host --domain <reserved>.ngrok-free.app` pins an address that survives restarts |
 | `no active collab session` | you are in a different repo — state is per-repo; `collab status` shows where it looked |
 | status line shows `reconnecting…` | the daemon lost the hub; it retries with backoff. `collab daemon status` |

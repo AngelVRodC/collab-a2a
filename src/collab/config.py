@@ -118,6 +118,23 @@ def resolve_name(explicit: str | None = None) -> str:
     return "agent"
 
 
+#: Sharing usage is on by default: the whole point is that an agent can weigh
+#: up who has quota left before handing out work.
+SHARE_STATS_DEFAULT = True
+
+
+def share_stats_enabled() -> bool:
+    value = load_config().get("share_stats")
+    return SHARE_STATS_DEFAULT if value is None else bool(value)
+
+
+def set_share_stats(enabled: bool) -> bool:
+    cfg = load_config()
+    cfg["share_stats"] = bool(enabled)
+    save_config(cfg)
+    return bool(enabled)
+
+
 def set_default_name(name: str) -> str:
     cfg = load_config()
     cfg["display_name"] = _slug(name)
@@ -153,6 +170,9 @@ class SessionProfile:
     room: str = "general"
     bridge_port: int | None = None
     home: str = ""
+    #: Stable identity on the hub. ``name`` is a label that can change; this
+    #: does not, so it is what the daemon uses to recognise itself.
+    participant_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.home:

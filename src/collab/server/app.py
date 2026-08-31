@@ -90,10 +90,11 @@ def create_app(
     host_name: str,
     public_url: str,
     invite_code: str | None = None,
+    title: str = "",
     supervisor: Any | None = None,
     on_url_change: Any | None = None,
 ) -> FastAPI:
-    hub = Hub(store, session_id=session_id, host_name=host_name)
+    hub = Hub(store, session_id=session_id, host_name=host_name, title=title)
 
     # The public URL can change under us: a free ngrok tunnel ends on its own
     # and comes back on a different address. Everything that hands out a URL
@@ -125,6 +126,20 @@ def create_app(
 
     join_limiter = RateLimiter(limit=10, window=60.0)
 
+    def resolve_target(name: str | None) -> tuple[str, str]:
+        """Turn a DM target into ``(display_name, participant_id)``.
+
+        The name may be one the sender captured before the recipient renamed
+        themselves, so it is looked up across every name they have held.
+        """
+        if not name:
+            return "", ""
+        pid = store.resolve_name(name)
+        if pid is None:
+            raise HTTPException(status_code=404, detail=f"no participant called {name!r}")
+        person = store.participant_by_id(pid)
+        return (person.name if person else name), pid
+
     # --- extension: join ------------------------------------------------------
 
     @app.post(f"{EXT_PREFIX}/join", tags=["collab"])
@@ -146,21 +161,32 @@ def create_app(
 
         requested = str(body.get("name") or "agent")
         hello = dict(body.get("hello") or {})
+
+        # Two people answering to one name makes every direct message a guess,
+        # so say so plainly instead of quietly renaming them to "bob-2".
+        if store.name_taken(requested):
+            raise HTTPException(
+                status_code=409,
+                detail=(f"the name {requested!r} is already taken in this session "
+                        "— join again with a different one (collab join <url> "
+                        "--name <another>)"),
+            )
         token = new_secret()
-        name = await asyncio.to_thread(
+        person = await asyncio.to_thread(
             store.add_participant, requested, token, is_host=False, meta=hello
         )
 
         await hub.publish(Envelope(
-            kind=KIND_HELLO, sender=name, room=DEFAULT_ROOM,
-            text=hello.get("focus", ""), body=hello,
+            kind=KIND_HELLO, sender=person.name, sender_id=person.id,
+            room=DEFAULT_ROOM, text=hello.get("focus", ""), body=hello,
         ))
         return {
             "token": token,
-            "name": name,
+            "name": person.name,
+            "id": person.id,
             "session_id": session_id,
-            "host": host_name,
-            "snapshot": hub.snapshot(viewer=name),
+            "host": hub.host_name,
+            "snapshot": hub.snapshot(viewer=person.id),
         }
 
     # --- extension: the live feed ---------------------------------------------
@@ -168,8 +194,8 @@ def create_app(
     @app.get(f"{EXT_PREFIX}/events", tags=["collab"])
     async def events(request: Request):
         user = _require(request)
-        await asyncio.to_thread(store.touch, user.name)
-        return await event_stream(request, hub, user.name)
+        await asyncio.to_thread(store.touch, user.id)
+        return await event_stream(request, hub, user.id, display_name=user.name)
 
     # --- extension: messaging --------------------------------------------------
 
@@ -178,14 +204,18 @@ def create_app(
         """Convenience path — the same fan-out A2A SendMessage performs."""
         user = _require(request)
         body = await request.json()
+        to_name, to_id = resolve_target(body.get("to"))
         env = Envelope(
             kind=str(body.get("kind") or "chat"),
             text=str(body.get("text") or ""),
-            room=body.get("room") or (None if body.get("to") else DEFAULT_ROOM),
-            to=body.get("to") or None,
+            room=body.get("room") or (None if to_id else DEFAULT_ROOM),
+            to=to_name or None,
+            to_id=to_id,
             thread=body.get("thread") or None,
             sender=user.name,
+            sender_id=user.id,
             body=dict(body.get("body") or {}),
+            stats=dict(body.get("stats") or {}),
         )
         env = await hub.publish(env)
         return {"seq": env.seq, "ts": env.ts}
@@ -194,7 +224,7 @@ def create_app(
     async def history(request: Request, room: str | None = None, limit: int = 50) -> dict[str, Any]:
         user = _require(request)
         items = await asyncio.to_thread(
-            store.history, room=room, viewer=user.name, limit=min(limit, 500)
+            store.history, room=room, viewer=user.id, limit=min(limit, 500)
         )
         return {"events": [e.to_dict() for e in items]}
 
@@ -214,7 +244,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="room name is required")
         await asyncio.to_thread(store.add_room, name, user.name)
         await hub.publish(Envelope(
-            kind=KIND_PRESENCE, sender=user.name, room=name,
+            kind=KIND_PRESENCE, sender=user.name, sender_id=user.id, room=name,
             body={"event": f"created room #{name}"},
         ))
         return {"rooms": store.rooms()}
@@ -222,12 +252,30 @@ def create_app(
     @app.get(f"{EXT_PREFIX}/participants", tags=["collab"])
     async def participants(request: Request) -> dict[str, Any]:
         user = _require(request)
-        return hub.snapshot(viewer=user.name, history=0)
+        return hub.snapshot(viewer=user.id, history=0)
 
     @app.get(f"{EXT_PREFIX}/snapshot", tags=["collab"])
     async def snapshot(request: Request) -> dict[str, Any]:
         user = _require(request)
-        return hub.snapshot(viewer=user.name)
+        return hub.snapshot(viewer=user.id)
+
+    @app.post(f"{EXT_PREFIX}/stats", tags=["collab"])
+    async def report_stats(request: Request) -> dict[str, Any]:
+        """Share what this agent knows about itself: machine, quota, spend.
+
+        Entirely optional and best-effort — an agent that cannot see its own
+        usage simply reports the machine it is on.
+        """
+        user = _require(request)
+        body = await request.json()
+        person = store.participant_by_id(user.id)
+        meta = dict(person.meta) if person else {}
+        meta["stats"] = dict(body.get("stats") or {})
+        for key in ("machine", "machine_id", "user"):
+            if body.get(key):
+                meta[key] = str(body[key])
+        await asyncio.to_thread(store.update_meta, user.id, meta)
+        return {"ok": True}
 
     @app.post(f"{EXT_PREFIX}/rename", tags=["collab"])
     async def rename(request: Request) -> dict[str, Any]:
@@ -236,12 +284,21 @@ def create_app(
         new_name = str(body.get("name") or "").strip()
         if not new_name:
             raise HTTPException(status_code=400, detail="name is required")
-        final = await asyncio.to_thread(store.rename, user.name, new_name)
+        if store.name_taken(new_name, except_id=user.id):
+            raise HTTPException(
+                status_code=409,
+                detail=f"the name {new_name!r} is already taken in this session",
+            )
+        was = user.name
+        final = await asyncio.to_thread(store.rename, user.id, new_name)
+        # Renaming changes a label, not an identity: the id is unchanged, so
+        # live subscriptions, DM routing and history visibility all still hold.
         await hub.publish(Envelope(
-            kind=KIND_PRESENCE, sender=final, room=DEFAULT_ROOM,
-            body={"event": f"is now known as {final}", "was": user.name},
+            kind=KIND_PRESENCE, sender=final, sender_id=user.id, room=DEFAULT_ROOM,
+            body={"event": f"is now known as {final}", "was": was,
+                  "renamed_to": final, "id": user.id},
         ))
-        return {"name": final}
+        return {"name": final, "id": user.id}
 
     # --- extension: shared task board --------------------------------------------
 
@@ -287,7 +344,8 @@ def create_app(
             detail=str(body.get("detail") or ""),
         )
         await hub.publish(Envelope(
-            kind=KIND_TASK, sender=user.name, room=body.get("room") or DEFAULT_ROOM,
+            kind=KIND_TASK, sender=user.name, sender_id=user.id,
+            room=body.get("room") or DEFAULT_ROOM,
             text=title,
             body={"action": action, "id": task_id, "title": title,
                   "state": record["state"], "owner": record["owner"]},
@@ -315,7 +373,12 @@ def create_app(
             store.mark_file(record["id"], "expired")
 
     def _may_touch(record: dict[str, Any], who: str) -> bool:
-        return not record["recipient"] or who in (record["recipient"], record["sender"])
+        """Compare by id where we have one, so a rename cannot lock you out."""
+        if not record["recipient"]:
+            return True
+        recipient_id = store.resolve_name(record["recipient"])
+        sender_id = store.resolve_name(record["sender"])
+        return who in (recipient_id, sender_id)
 
     def _download_url(file_id: str) -> str:
         return f"{live_url().rstrip('/')}{EXT_PREFIX}/files/{file_id}/content"
@@ -325,6 +388,7 @@ def create_app(
                           to: str | None = None, room: str | None = None) -> dict[str, Any]:
         user = _require(request)
         _sweep_expired()
+        to_name, to_id = resolve_target(to)
 
         file_id = new_id("f")
         digest = hashlib.sha256()
@@ -351,10 +415,12 @@ def create_app(
         name = Path(file.filename or "file").name
         record = await asyncio.to_thread(
             store.add_file, file_id, name=name, size=size, sha256=digest.hexdigest(),
-            sender=user.name, recipient=to, room=room or DEFAULT_ROOM,
+            sender=user.name, recipient=to_name or None, room=room or DEFAULT_ROOM,
         )
         await hub.publish(Envelope(
-            kind=KIND_FILE, sender=user.name, to=to, room=None if to else (room or DEFAULT_ROOM),
+            kind=KIND_FILE, sender=user.name, sender_id=user.id,
+            to=to_name or None, to_id=to_id,
+            room=None if to_id else (room or DEFAULT_ROOM),
             body={"action": "shared", "id": file_id, "name": name, "size": size,
                   "sha256": record["sha256"], "url": _download_url(file_id)},
         ))
@@ -364,8 +430,10 @@ def create_app(
     async def list_files(request: Request) -> dict[str, Any]:
         user = _require(request)
         _sweep_expired()
+        visible = [f for f in store.files()
+                   if _may_touch(f, user.id)]
         return {"files": [{**f, "download_url": _download_url(f["id"])}
-                          for f in store.files(viewer=user.name)]}
+                          for f in visible]}
 
     @app.get(f"{EXT_PREFIX}/files/{{file_id}}/content", tags=["collab"])
     async def download_file(request: Request, file_id: str):
@@ -373,7 +441,7 @@ def create_app(
         record = store.get_file(file_id)
         if record is None or record["state"] != "available":
             raise HTTPException(status_code=404, detail="no such file (it may already be collected)")
-        if not _may_touch(record, user.name):
+        if not _may_touch(record, user.id):
             raise HTTPException(status_code=403, detail="that file was not shared with you")
         path = _blob(file_id)
         if not path.exists():
@@ -389,14 +457,15 @@ def create_app(
         record = store.get_file(file_id)
         if record is None:
             raise HTTPException(status_code=404, detail="no such file")
-        if not _may_touch(record, user.name):
+        if not _may_touch(record, user.id):
             raise HTTPException(status_code=403, detail="that file was not shared with you")
         with contextlib.suppress(OSError):
             _blob(file_id).unlink()
         await asyncio.to_thread(store.mark_file, file_id, "collected", acked_by=user.name)
         await hub.publish(Envelope(
-            kind=KIND_FILE, sender=user.name,
+            kind=KIND_FILE, sender=user.name, sender_id=user.id,
             to=record["sender"] if record["recipient"] else None,
+            to_id=store.resolve_name(record["sender"]) or "" if record["recipient"] else "",
             room=None if record["recipient"] else record["room"],
             body={"action": "received", "id": file_id, "name": record["name"]},
         ))
@@ -424,7 +493,8 @@ def create_app(
             raise HTTPException(status_code=403, detail="only the host can remove participants")
         body = await request.json()
         name = str(body.get("name") or "")
-        ok = await hub.revoke(name)
+        target_id = store.resolve_name(name)
+        ok = await hub.revoke(target_id) if target_id else False
         if not ok:
             raise HTTPException(status_code=404, detail=f"no removable participant {name!r}")
         return {"removed": name}

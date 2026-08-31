@@ -62,11 +62,18 @@ class CollabAgentExecutor(AgentExecutor):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         sender = "anonymous"
+        sender_id = ""
         call_context = context.call_context
         if call_context is not None and call_context.user.is_authenticated:
             sender = call_context.user.user_name
+            # Starlette's adapter exposes the raw user, which carries the id.
+            raw = getattr(call_context.user, "_user", None)
+            sender_id = getattr(raw, "id", "") or ""
 
         env = _envelope_from_message(context.message, sender)
+        env.sender_id = sender_id
+        if env.to and not env.to_id:
+            env.to_id = self.hub.store.resolve_name(env.to) or ""
         env = await self.hub.publish(env)
         await event_queue.enqueue_event(ack_message(env))
 

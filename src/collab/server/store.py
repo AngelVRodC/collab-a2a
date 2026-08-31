@@ -5,6 +5,12 @@ it is handed out on append, and it doubles as the SSE ``id:``.  Resume after a
 disconnect, ``/history`` backfill, and surviving a hub restart all fall out of
 that single design.
 
+**Identity is an id, never a display name.**  Names are what people see and
+they change; routing a message or a permission check on one breaks the instant
+someone renames themselves.  Every participant gets a stable ``p_...`` id, and
+``participant_names`` remembers every name they have ever held, so a reference
+someone still holds to an old name resolves to the right person.
+
 Everything here is synchronous sqlite3 called through ``asyncio.to_thread`` by
 the callers, so we take no async-driver dependency.
 """
@@ -16,6 +22,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,24 +31,33 @@ from ..protocol import Envelope
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
-    seq       INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind      TEXT NOT NULL,
-    room      TEXT,
-    sender    TEXT NOT NULL,
-    recipient TEXT,
-    ts        TEXT NOT NULL,
-    payload   TEXT NOT NULL
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,
+    room         TEXT,
+    sender       TEXT NOT NULL,
+    recipient    TEXT,
+    sender_id    TEXT,
+    recipient_id TEXT,
+    ts           TEXT NOT NULL,
+    payload      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_room ON events(room, seq);
 
 CREATE TABLE IF NOT EXISTS participants (
-    name       TEXT PRIMARY KEY,
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
     token_hash TEXT NOT NULL UNIQUE,
     is_host    INTEGER NOT NULL DEFAULT 0,
     joined_at  REAL NOT NULL,
     last_seen  REAL NOT NULL,
     revoked    INTEGER NOT NULL DEFAULT 0,
     meta       TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS participant_names (
+    name           TEXT PRIMARY KEY,
+    participant_id TEXT NOT NULL,
+    claimed_at     REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS invites (
@@ -90,8 +106,13 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def new_participant_id() -> str:
+    return "p_" + uuid.uuid4().hex[:12]
+
+
 @dataclass
 class Participant:
+    id: str
     name: str
     is_host: bool
     joined_at: float
@@ -127,9 +148,10 @@ class Store:
         """
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO events (kind, room, sender, recipient, ts, payload)"
-                " VALUES (?,?,?,?,?,?)",
-                (env.kind, env.room, env.sender, env.to, env.ts, ""),
+                "INSERT INTO events (kind, room, sender, recipient, sender_id,"
+                " recipient_id, ts, payload) VALUES (?,?,?,?,?,?,?,?)",
+                (env.kind, env.room, env.sender, env.to,
+                 env.sender_id, env.to_id, env.ts, ""),
             )
             env.seq = int(cur.lastrowid)
             self._db.execute(
@@ -140,23 +162,23 @@ class Store:
         return env
 
     def since(self, seq: int, *, viewer: str | None = None, limit: int = 500) -> list[Envelope]:
-        """Events after ``seq`` that ``viewer`` is allowed to see."""
+        """Events after ``seq`` that ``viewer`` (a participant id) may see."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT payload, recipient, sender FROM events WHERE seq > ?"
+                "SELECT payload, recipient_id, sender_id FROM events WHERE seq > ?"
                 " ORDER BY seq LIMIT ?",
                 (seq, limit),
             ).fetchall()
         out = []
         for r in rows:
-            if not _visible_to(r["recipient"], r["sender"], viewer):
+            if not _visible_to(r["recipient_id"], r["sender_id"], viewer):
                 continue
             out.append(Envelope.from_dict(json.loads(r["payload"])))
         return out
 
     def history(self, *, room: str | None = None, viewer: str | None = None,
                 limit: int = 50) -> list[Envelope]:
-        sql = "SELECT payload, recipient, sender FROM events"
+        sql = "SELECT payload, recipient_id, sender_id FROM events"
         args: list[Any] = []
         if room:
             sql += " WHERE room = ?"
@@ -167,7 +189,7 @@ class Store:
             rows = self._db.execute(sql, args).fetchall()
         out = []
         for r in rows:
-            if not _visible_to(r["recipient"], r["sender"], viewer):
+            if not _visible_to(r["recipient_id"], r["sender_id"], viewer):
                 continue
             out.append(Envelope.from_dict(json.loads(r["payload"])))
             if len(out) >= limit:
@@ -182,24 +204,75 @@ class Store:
     # --- participants --------------------------------------------------------
 
     def add_participant(self, name: str, token: str, *, is_host: bool = False,
-                        meta: dict[str, Any] | None = None) -> str:
+                        meta: dict[str, Any] | None = None) -> Participant:
         """Insert a participant, suffixing the name if it is already taken."""
         now = time.time()
+        pid = new_participant_id()
         with self._lock:
             final = name
             n = 2
+            # Callers reject a name a live participant holds, so this loop only
+            # guards the table's UNIQUE constraint. A name left behind by
+            # someone who renamed away is free to claim.
             while self._db.execute(
-                "SELECT 1 FROM participants WHERE name=?", (final,)
+                "SELECT 1 FROM participants WHERE name=? AND revoked=0", (final,)
             ).fetchone():
                 final = f"{name}-{n}"
                 n += 1
             self._db.execute(
-                "INSERT INTO participants (name, token_hash, is_host, joined_at, last_seen, meta)"
-                " VALUES (?,?,?,?,?,?)",
-                (final, token_hash(token), int(is_host), now, now, json.dumps(meta or {})),
+                "INSERT INTO participants (id, name, token_hash, is_host, joined_at,"
+                " last_seen, meta) VALUES (?,?,?,?,?,?,?)",
+                (pid, final, token_hash(token), int(is_host), now, now,
+                 json.dumps(meta or {})),
+            )
+            self._db.execute(
+                "INSERT OR REPLACE INTO participant_names (name, participant_id,"
+                " claimed_at) VALUES (?,?,?)",
+                (final, pid, now),
             )
             self._db.commit()
-        return final
+        return Participant(id=pid, name=final, is_host=is_host, joined_at=now,
+                           last_seen=now, revoked=False, meta=dict(meta or {}))
+
+    def name_taken(self, name: str, *, except_id: str = "") -> bool:
+        """Is this name currently held by somebody still in the session?
+
+        Only *current* names count: a name freed by a rename, or belonging to
+        someone who was removed, is available again.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id FROM participants WHERE name=? AND revoked=0", (name,)
+            ).fetchone()
+        return bool(row) and row["id"] != except_id
+
+    def resolve_name(self, name: str) -> str | None:
+        """Find a participant id from a name, current or historical.
+
+        Whoever holds the name *now* wins: if somebody renamed away and a new
+        arrival took the name, that name means the new arrival. Only when no
+        one currently holds it does it fall back to the last person who did,
+        which is what keeps a stale reference from before a rename working.
+        """
+        if not name:
+            return None
+        with self._lock:
+            current = self._db.execute(
+                "SELECT id FROM participants WHERE name=? AND revoked=0", (name,)
+            ).fetchone()
+            if current:
+                return str(current["id"])
+            historical = self._db.execute(
+                "SELECT participant_id FROM participant_names WHERE name=?", (name,)
+            ).fetchone()
+        return str(historical["participant_id"]) if historical else None
+
+    def participant_by_id(self, participant_id: str) -> Participant | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM participants WHERE id=?", (participant_id,)
+            ).fetchone()
+        return _to_participant(row) if row else None
 
     def participant_for_token(self, token: str) -> Participant | None:
         with self._lock:
@@ -219,37 +292,51 @@ class Store:
             rows = self._db.execute(sql).fetchall()
         return [_to_participant(r) for r in rows]
 
-    def touch(self, name: str) -> None:
+    def touch(self, participant_id: str) -> None:
         with self._lock:
             self._db.execute(
-                "UPDATE participants SET last_seen=? WHERE name=?", (time.time(), name)
+                "UPDATE participants SET last_seen=? WHERE id=?",
+                (time.time(), participant_id),
             )
             self._db.commit()
 
-    def update_meta(self, name: str, meta: dict[str, Any]) -> None:
+    def update_meta(self, participant_id: str, meta: dict[str, Any]) -> None:
         with self._lock:
             self._db.execute(
-                "UPDATE participants SET meta=? WHERE name=?", (json.dumps(meta), name)
+                "UPDATE participants SET meta=? WHERE id=?",
+                (json.dumps(meta), participant_id),
             )
             self._db.commit()
 
-    def revoke(self, name: str) -> bool:
+    def revoke(self, participant_id: str) -> bool:
         with self._lock:
             cur = self._db.execute(
-                "UPDATE participants SET revoked=1 WHERE name=? AND is_host=0", (name,)
+                "UPDATE participants SET revoked=1 WHERE id=? AND is_host=0",
+                (participant_id,),
             )
             self._db.commit()
         return cur.rowcount > 0
 
-    def rename(self, old: str, new: str) -> str:
+    def rename(self, participant_id: str, new: str) -> str:
+        """Change the display name. The id — and so all routing — is untouched."""
+        now = time.time()
         with self._lock:
             final, n = new, 2
             while self._db.execute(
-                "SELECT 1 FROM participants WHERE name=? AND name<>?", (final, old)
+                "SELECT 1 FROM participants WHERE name=? AND id<>? AND revoked=0",
+                (final, participant_id),
             ).fetchone():
                 final = f"{new}-{n}"
                 n += 1
-            self._db.execute("UPDATE participants SET name=? WHERE name=?", (final, old))
+            self._db.execute(
+                "UPDATE participants SET name=? WHERE id=?", (final, participant_id)
+            )
+            # Keep the old name pointing here so references to it still resolve.
+            self._db.execute(
+                "INSERT OR REPLACE INTO participant_names (name, participant_id, claimed_at)"
+                " VALUES (?,?,?)",
+                (final, participant_id, now),
+            )
             self._db.commit()
         return final
 
@@ -389,15 +476,22 @@ class Store:
         return [dict(r) for r in rows]
 
 
-def _visible_to(recipient: str | None, sender: str, viewer: str | None) -> bool:
-    """DMs are visible only to their two ends; everything else is room-wide."""
-    if not recipient or viewer is None:
-        return not recipient or viewer is None
-    return viewer in (recipient, sender)
+def _visible_to(recipient_id: str | None, sender_id: str | None,
+                viewer_id: str | None) -> bool:
+    """DMs are visible only to their two ends; everything else is room-wide.
+
+    Compared by id, so a rename on either end changes nothing.
+    """
+    if not recipient_id:
+        return True
+    if viewer_id is None:
+        return True
+    return viewer_id in (recipient_id, sender_id)
 
 
 def _to_participant(row: sqlite3.Row) -> Participant:
     return Participant(
+        id=row["id"],
         name=row["name"],
         is_host=bool(row["is_host"]),
         joined_at=row["joined_at"],

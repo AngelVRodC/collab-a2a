@@ -23,8 +23,13 @@ logger = logging.getLogger(__name__)
 KEEPALIVE_SECONDS = 15.0
 
 
-async def event_stream(request: Request, hub: Hub, participant: str) -> EventSourceResponse:
-    """Open the feed for ``participant``, replaying anything they missed first."""
+async def event_stream(request: Request, hub: Hub, participant: str,
+                       *, display_name: str = "") -> EventSourceResponse:
+    """Open the feed for ``participant`` (an id), replaying anything missed.
+
+    Keyed by id rather than name so a rename does not silently orphan the
+    subscription and make the person look offline to everyone.
+    """
     last_event_id = request.headers.get("last-event-id") or request.query_params.get("since")
     try:
         resume_from = int(last_event_id) if last_event_id else None
@@ -47,7 +52,8 @@ async def event_stream(request: Request, hub: Hub, participant: str) -> EventSou
             yield {
                 "event": "ready",
                 "data": json.dumps({
-                    "participant": participant,
+                    "participant": display_name or participant,
+                    "participant_id": participant,
                     "resumed_from": resume_from,
                     "seq": hub.store.max_seq(),
                 }),

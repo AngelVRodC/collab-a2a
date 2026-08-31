@@ -23,6 +23,7 @@ class HubConfig:
     bind: str
     invite: str
     host_token: str
+    title: str = ""
     public_url: str = ""
     tunnel: str = "none"
     #: A reserved ngrok domain, if one was given. Without it a restarted
@@ -73,7 +74,7 @@ def new_session_id() -> str:
 
 
 def create_session(host_name: str, port: int, bind: str = "127.0.0.1",
-                   domain: str = "") -> HubConfig:
+                   domain: str = "", title: str = "") -> HubConfig:
     """Mint a session with fresh credentials and seed its store."""
     ensure_home()
     cfg = HubConfig(
@@ -84,6 +85,7 @@ def create_session(host_name: str, port: int, bind: str = "127.0.0.1",
         invite=new_secret(),
         host_token=new_secret(),
         domain=domain,
+        title=title,
     )
     cfg.save()
 

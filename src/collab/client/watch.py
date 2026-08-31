@@ -20,6 +20,7 @@ from typing import Any
 from ..config import SessionProfile
 from ..protocol import (
     Envelope,
+    local_clock,
     KIND_CHAT,
     KIND_FILE,
     KIND_HELLO,
@@ -58,7 +59,8 @@ def _speaker_color(name: str) -> str:
 
 
 def _clock(ts: str) -> str:
-    return ts[11:16] if len(ts) >= 16 else ts
+    """Local time: UTC is right for the wire, wrong for a person reading it."""
+    return local_clock(ts)
 
 
 def format_event(env: Envelope, *, me: str | None = None, width: int = 80) -> str:

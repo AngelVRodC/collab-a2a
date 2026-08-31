@@ -1,0 +1,213 @@
+"""Finding the other collab agents on this machine.
+
+Session state is per repo, which is right — but it means two agents on the same
+laptop in different checkouts cannot see each other, and two agents that both
+*joined* a remote host have no idea they are sitting on the same machine.
+
+So every live session also announces itself in one place in the user's home
+directory. That registry answers two different questions:
+
+* **Join without a link.** A session hosted here can be joined from any other
+  repo on this machine, no URL needed.
+* **Who is co-located.** A machine fingerprint travels with each participant to
+  the hub, so everyone — including remote participants — can tell which agents
+  share a machine and a user, however they connected.
+"""
+
+from __future__ import annotations
+
+import getpass
+import hashlib
+import json
+import os
+import platform
+import socket
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from .config import global_config_path
+
+#: A record is stale once its process is gone or it stops being refreshed.
+STALE_AFTER = 90.0
+
+
+def peers_dir() -> Path:
+    if override := os.environ.get("COLLAB_PEERS_DIR"):
+        return Path(override)
+    return global_config_path().parent / "peers"
+
+
+def machine_name() -> str:
+    try:
+        return socket.gethostname() or platform.node() or "unknown"
+    except OSError:
+        return platform.node() or "unknown"
+
+
+def current_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+
+
+def machine_id() -> str:
+    """A stable, non-identifying fingerprint for this machine and user.
+
+    Hashed rather than raw: it travels to the hub and on to every participant,
+    including people on other machines, so it should say "same box as me" and
+    nothing more.
+    """
+    seed = ""
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            seed = Path(path).read_text().strip()
+            if seed:
+                break
+        except OSError:
+            continue
+    if not seed:
+        seed = f"{platform.node()}|{platform.system()}"
+    digest = hashlib.sha256(f"{seed}|{current_user()}".encode()).hexdigest()
+    return "m_" + digest[:16]
+
+
+def identity() -> dict[str, str]:
+    """What we tell the hub about where this agent is running."""
+    return {
+        "machine": machine_name(),
+        "machine_id": machine_id(),
+        "user": current_user(),
+    }
+
+
+@dataclass
+class Peer:
+    session_id: str
+    name: str
+    role: str            # "host" or "guest"
+    url: str
+    repo: str
+    home: str
+    pid: int
+    updated_at: float
+    machine_id: str
+    machine: str
+    user: str
+    participant_id: str = ""
+    invite: str = ""     # hosts only, so a local agent can join without a link
+    host_name: str = ""
+
+    @property
+    def alive(self) -> bool:
+        if (time.time() - self.updated_at) > STALE_AFTER:
+            return False
+        try:
+            os.kill(self.pid, 0)
+        except (OSError, ProcessLookupError):
+            return False
+        return True
+
+    @property
+    def joinable(self) -> bool:
+        return bool(self.invite) and self.alive
+
+    def join_url(self) -> str:
+        return f"{self.url}#{self.invite}" if self.invite else self.url
+
+
+def _record_path(session_id: str, pid: int | None = None) -> Path:
+    """One record per *participant*, not per session.
+
+    Two agents on this machine can be in the same session — a host and a guest
+    in different checkouts is the common case — so keying on the session alone
+    made each overwrite the other.
+    """
+    return peers_dir() / f"{session_id}-{pid or os.getpid()}.json"
+
+
+def announce(*, session_id: str, name: str, role: str, url: str, repo: str,
+             home: str, participant_id: str = "", invite: str = "",
+             host_name: str = "") -> Path:
+    """Publish (or refresh) this session's presence on the machine."""
+    d = peers_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    peer = Peer(
+        session_id=session_id, name=name, role=role, url=url, repo=repo,
+        home=home, pid=os.getpid(), updated_at=time.time(),
+        participant_id=participant_id, invite=invite, host_name=host_name,
+        **identity(),
+    )
+    path = _record_path(session_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(asdict(peer), indent=2))
+    tmp.replace(path)
+    # It can carry a live invite, so keep it to this user.
+    os.chmod(path, 0o600)
+    return path
+
+
+def withdraw(session_id: str) -> None:
+    try:
+        _record_path(session_id).unlink()
+    except OSError:
+        pass
+
+
+def load(path: Path) -> Peer | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    known = {f for f in Peer.__dataclass_fields__}
+    try:
+        return Peer(**{k: v for k, v in data.items() if k in known})
+    except TypeError:
+        return None
+
+
+def discover(*, include_stale: bool = False, prune: bool = True) -> list[Peer]:
+    """Every collab session running on this machine for this user."""
+    d = peers_dir()
+    if not d.is_dir():
+        return []
+    found: list[Peer] = []
+    for child in sorted(d.glob("*.json")):
+        peer = load(child)
+        if peer is None:
+            continue
+        if peer.alive or include_stale:
+            found.append(peer)
+        elif prune:
+            # The process is gone; the record is just litter now.
+            try:
+                child.unlink()
+            except OSError:
+                pass
+    return found
+
+
+def find(reference: str) -> Peer | None:
+    """Look a session up by id, by name, or by the repo it runs in.
+
+    Only hosts can be joined, so a bare lookup prefers them — otherwise asking
+    to "join what is running here" could pick our own guest record.
+    """
+    found = discover()
+    if not reference:
+        hosts = [p for p in found if p.joinable]
+        return hosts[0] if len(hosts) == 1 else None
+    for peer in sorted(found, key=lambda p: not p.joinable):
+        if reference in (peer.session_id, peer.name, peer.host_name):
+            return peer
+    for peer in sorted(found, key=lambda p: not p.joinable):
+        if reference in peer.repo or Path(peer.repo).name == reference:
+            return peer
+    return None
+
+
+def same_machine(meta: dict[str, Any]) -> bool:
+    """Is a participant (from a roster entry) running on this machine?"""
+    return bool(meta.get("machine_id")) and meta.get("machine_id") == machine_id()

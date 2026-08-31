@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,7 +48,30 @@ def new_id(prefix: str) -> str:
 
 
 def now_iso() -> str:
+    """Timestamps travel in UTC so participants in different zones agree."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def local_clock(ts: str, fmt: str = "%H:%M") -> str:
+    """Render a wire timestamp in the reader's own timezone.
+
+    UTC is right for the wire and wrong for a person reading a transcript on
+    their own machine.
+    """
+    if not ts:
+        return ""
+    try:
+        parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return ts[11:16] if len(ts) >= 16 else ts
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime(fmt)
 
 
 @dataclass
@@ -67,6 +91,13 @@ class Envelope:
     body: dict[str, Any] = field(default_factory=dict)
     seq: int | None = None
     ts: str = field(default_factory=now_iso)
+    #: Routing identity. ``sender``/``to`` are display names and may change at
+    #: any moment; delivery and visibility are decided on these instead.
+    sender_id: str = ""
+    to_id: str = ""
+    #: Optional self-reported usage, piggybacked on any message. Riding along
+    #: with normal traffic keeps it current without a separate heartbeat.
+    stats: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -87,6 +118,12 @@ class Envelope:
             d["body"] = self.body
         if self.seq is not None:
             d["seq"] = self.seq
+        if self.sender_id:
+            d["fromId"] = self.sender_id
+        if self.to_id:
+            d["toId"] = self.to_id
+        if self.stats:
+            d["stats"] = self.stats
         return d
 
     @classmethod
@@ -103,6 +140,9 @@ class Envelope:
             # proto Struct coerces numbers to float; normalise back to int.
             seq=int(seq) if seq is not None else None,
             ts=str(d.get("ts") or now_iso()),
+            sender_id=str(d.get("fromId") or ""),
+            to_id=str(d.get("toId") or ""),
+            stats=dict(d.get("stats") or {}),
         )
 
     def is_direct(self) -> bool:

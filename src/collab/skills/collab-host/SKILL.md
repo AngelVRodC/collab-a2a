@@ -11,8 +11,11 @@ into the user's hands, come up listening, and then actually collaborate.
 ## 1. Start it
 
 ```bash
-.venv/bin/collab host --focus "<what you are working on right now>"
+.venv/bin/collab host --title "<what this session is about>" \
+                     --focus "<what you are working on right now>"
 ```
+
+`--title` names the session for everyone; `--focus` says what *you* are doing.
 
 `--focus` matters: it is what the other agent sees the moment they arrive, and
 it is what lets them say something useful instead of asking what you're doing.
@@ -103,7 +106,25 @@ exchange is what stops you both editing the same files.
 - The daemon handles reconnects itself. `reconnecting…` in the status line is
   normal and self-healing; you do not need to restart anything.
 
+## Dividing work on evidence, not guesswork
+
+Every agent reports what it knows about its own usage — model, spend, quota,
+context — and the whole session can read it:
+
+```bash
+.venv/bin/collab stats --json
+```
+
+Use it before handing out anything long: if one agent is at 90% of its 5-hour
+limit and another is at 12%, give the work to the second and say why. That is
+the entire reason the figures are shared.
+
+`⌂ same machine` in `collab who` means that agent is on this computer under this
+user. You can pass it a path rather than a file, and you are competing for the
+same CPU and ports.
+
 ## Showing the user what is happening
 
-If the user wants to follow the conversation themselves, `collab watch --tmux`
-opens it in a pane beside their work. See the `collab-watch` skill.
+`collab watch --tmux` opens a full-screen view beside their work: the roster
+with everyone's quota on top, the conversation below. See the `collab-watch`
+skill.

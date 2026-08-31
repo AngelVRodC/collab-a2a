@@ -63,6 +63,51 @@ def _effective_state(status: dict[str, Any]) -> str:
     return "reconnecting" if raw in ("reconnecting", "starting") else "offline"
 
 
+def stash_agent_stats(raw: str, cwd: Path | None) -> None:
+    """Save the usage figures the host agent handed us, for the daemon to share.
+
+    The status line must never touch the network, and the daemon must never
+    guess at the agent's internals — so the two meet through a file.
+    """
+    if not raw.strip():
+        return
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return
+
+    stats: dict[str, Any] = {}
+    if isinstance(data.get("model"), dict):
+        stats["model"] = data["model"].get("display_name")
+    if isinstance(data.get("cost"), dict):
+        cost = data["cost"]
+        if cost.get("total_cost_usd") is not None:
+            stats["cost_usd"] = round(float(cost["total_cost_usd"]), 4)
+        if cost.get("total_lines_added") is not None:
+            stats["lines_added"] = cost.get("total_lines_added")
+            stats["lines_removed"] = cost.get("total_lines_removed")
+    if isinstance(data.get("rate_limits"), dict):
+        limits = data["rate_limits"]
+        for key in ("five_hour", "seven_day"):
+            window = limits.get(key)
+            if isinstance(window, dict) and window.get("used_percentage") is not None:
+                stats[f"quota_{key}"] = round(float(window["used_percentage"]), 1)
+    if isinstance(data.get("context_window"), dict):
+        used = data["context_window"].get("used_percentage")
+        if used is not None:
+            stats["context_pct"] = round(float(used), 1)
+    if not stats:
+        return
+
+    try:
+        profile = SessionProfile.current(cwd)
+        if profile is None:
+            return
+        (profile.dir / "agent_stats.json").write_text(json.dumps(stats))
+    except (OSError, ValueError):
+        pass
+
+
 def cwd_from_session_json(raw: str) -> Path | None:
     """Pull the working directory out of Claude Code's status line payload.
 
@@ -105,6 +150,7 @@ def render(status: dict[str, Any] | None = None, *, width: int | None = None,
         return ""
 
     state = _effective_state(status)
+    version = str(status.get("version") or "")
     name = status.get("name") or "?"
     host = status.get("host") or "?"
     others = int(status.get("others_connected") or 0)
@@ -122,9 +168,16 @@ def render(status: dict[str, Any] | None = None, *, width: int | None = None,
     else:
         tail = _paint("offline", "offline")
 
-    parts = [glyph, label, who, tail]
+    parts = [glyph, label]
+    if version:
+        parts.append(_paint(f"v{version}", "dim"))
+    parts += [who, tail]
     if unread:
         parts.append(_paint(f"✉{unread}", "live"))
+    if _update_available():
+        # Two agents on different versions can disagree about the wire format,
+        # so this is worth a nudge rather than silence.
+        parts.append(_paint("↑update", "reconnecting"))
     line = "  ".join(parts)
 
     limit = width or _terminal_width()
@@ -132,6 +185,17 @@ def render(status: dict[str, Any] | None = None, *, width: int | None = None,
         # Drop the decorative half before truncating anything informative.
         line = "  ".join([glyph, who, tail])
     return line
+
+
+def _update_available() -> bool:
+    """Read the cached answer only. The status line never goes near a network."""
+    try:
+        from ..update import read_cache
+
+        info = read_cache()
+        return bool(info and info.available)
+    except Exception:
+        return False
 
 
 def _visible_len(s: str) -> int:
@@ -166,6 +230,8 @@ def status_payload(cwd: Path | None = None) -> dict[str, Any]:
     return {
         "active": True,
         "state": _effective_state(status),
+        "version": status.get("version"),
+        "update_available": _update_available(),
         "name": status.get("name"),
         "host": status.get("host"),
         "is_host": bool(status.get("is_host")),
@@ -208,8 +274,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv if argv is not None else [])
 
     cwd = Path(args.cwd) if args.cwd else None
+    raw = "" if args.cwd else _read_stdin_if_ready()
     if cwd is None:
-        cwd = cwd_from_session_json(_read_stdin_if_ready())
+        cwd = cwd_from_session_json(raw)
+    if raw:
+        stash_agent_stats(raw, cwd)
 
     try:
         if args.plain:

@@ -108,6 +108,7 @@ def join_session(
         token=result["token"],
         is_host=False,
         room=room,
+        participant_id=result.get("id", ""),
     )
     profile.save()
 

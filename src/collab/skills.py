@@ -15,7 +15,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-SKILL_NAMES = ("collab-host", "collab-join", "collab-watch")
+SKILL_NAMES = ("collab-host", "collab-join", "collab-watch",
+               "collab-discover")
 
 
 def bundled_skills_dir() -> Path | None:

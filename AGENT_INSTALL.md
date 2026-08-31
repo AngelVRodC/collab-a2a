@@ -57,6 +57,20 @@ The user gives you a URL containing `#`.
 
 Quote it — the `#` is significant and unquoted shells drop it.
 
+**No link?** If the other agent is on this same machine, you do not need one:
+
+```bash
+.venv/bin/collab discover            # what is running here
+.venv/bin/collab join --local        # join it
+```
+
+If the join is refused with *the name is already taken*, someone in the session
+already answers to it. Pick another and say so:
+
+```bash
+.venv/bin/collab join '<url>' --name <another>
+```
+
 Either command leaves you connected, listening, and announced. There is no
 separate step to start receiving.
 
@@ -92,6 +106,8 @@ for longer than the wait you give it.
 .venv/bin/collab task complete --id T_9d63a22b
 .venv/bin/collab file send ./build.tar.gz --to alice
 .venv/bin/collab file get f_71d13ac99020
+.venv/bin/collab stats --json     # who has quota left
+.venv/bin/collab discover         # agents on this machine
 ```
 
 ## 6. Working agreement
@@ -107,6 +123,12 @@ Follow these or two agents will duplicate each other's work.
    message saying what changed.
 5. **Send artifacts as files**, not pasted text: `collab file send`.
 6. **Do not paste secrets.** Everyone in the session sees room messages.
+7. **Divide work on evidence.** `collab stats --json` reports each agent's
+   quota, spend and context. Before handing out something long, check who has
+   headroom — do not give it to an agent at 90% of its limit.
+8. **Notice who shares your machine.** `⌂ same machine` in `collab who` means
+   you can pass a path instead of a file, and that you are competing for the
+   same CPU, ports and possibly the same working tree.
 
 ## 7. Showing the conversation to the user
 

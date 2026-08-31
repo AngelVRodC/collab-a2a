@@ -135,9 +135,39 @@ def test_join_broadcasts_a_hello(client, session, host_headers):
     assert hello[0]["body"]["repo"] == "collab"
 
 
-def test_duplicate_names_are_disambiguated(client, session):
+def test_a_taken_name_is_refused_with_a_clear_reason(client, session):
+    """Two people answering to one name makes every DM a guess."""
     assert _join(client, session, name="bob")["name"] == "bob"
-    assert _join(client, session, name="bob")["name"] == "bob-2"
+
+    r = client.post("/ext/collab/v1/join", json={
+        "invite": session["invite"], "name": "bob", "hello": {},
+    })
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "already taken" in detail
+    assert "--name" in detail, "the message has to say how to fix it"
+
+
+def test_the_hosts_name_is_protected_too(client, session):
+    r = client.post("/ext/collab/v1/join", json={
+        "invite": session["invite"], "name": "alice", "hello": {},
+    })
+    assert r.status_code == 409
+
+
+def test_a_name_freed_by_a_rename_can_be_taken(client, session):
+    """Rejection is about live collisions, not reserving names forever."""
+    bob = _join(client, session, name="bob")
+    headers = {"Authorization": f"Bearer {bob['token']}"}
+    client.post("/ext/collab/v1/rename", json={"name": "roberto"}, headers=headers)
+    assert _join(client, session, name="bob")["name"] == "bob"
+
+
+def test_renaming_onto_a_taken_name_is_refused(client, session):
+    bob = _join(client, session, name="bob")
+    headers = {"Authorization": f"Bearer {bob['token']}"}
+    r = client.post("/ext/collab/v1/rename", json={"name": "alice"}, headers=headers)
+    assert r.status_code == 409
 
 
 # --- visibility -------------------------------------------------------------------

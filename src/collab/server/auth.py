@@ -36,9 +36,11 @@ def new_secret() -> str:
 
 
 class ParticipantUser(BaseUser):
-    def __init__(self, name: str, *, is_host: bool) -> None:
+    def __init__(self, name: str, *, is_host: bool, participant_id: str = "") -> None:
         self.name = name
         self.is_host = is_host
+        #: The stable identity. ``name`` is a label the person can change.
+        self.id = participant_id
 
     @property
     def is_authenticated(self) -> bool:
@@ -73,7 +75,8 @@ class BearerBackend(AuthenticationBackend):
             raise AuthenticationError("invalid or revoked token")
         scopes = ["authenticated"] + (["host"] if participant.is_host else [])
         return AuthCredentials(scopes), ParticipantUser(
-            participant.name, is_host=participant.is_host
+            participant.name, is_host=participant.is_host,
+            participant_id=participant.id,
         )
 
 

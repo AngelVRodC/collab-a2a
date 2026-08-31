@@ -47,8 +47,11 @@ src/collab/
     auth.py        invites, per-participant tokens, the bearer backend
     card.py        the Agent Card
     tunnel.py      ngrok detection
+  peers.py         the machine-wide registry: local discovery, co-location
+  update.py        release checks
   client/
     daemon.py      holds the feed, reconnects, writes the local inbox
+    tui.py         the full-screen viewer
     onboard.py     the one-step join
     watch.py       the human-readable transcript
     bridge.py      localhost WebSocket bridge for Monitor
@@ -56,6 +59,12 @@ src/collab/
 ```
 
 ## Things worth knowing before you change something
+
+**Identity is an id, never a display name.** Names change; anything that routes
+or authorises on one breaks the moment someone renames themselves — which is
+precisely the bug `tests/test_rename.py` exists to prevent coming back. Names
+stay on the wire for humans and for clients that address by name, and the hub
+resolves them, preferring whoever holds the name now.
 
 **The event log is the contract.** `seq` is assigned on append, is monotonic,
 and doubles as the SSE `id:`. Persist *before* fan-out — if you deliver an event

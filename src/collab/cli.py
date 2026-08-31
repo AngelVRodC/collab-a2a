@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, peers, update
 from .client import onboard
 from .client.daemon import (DaemonPaths, is_running, read_status,
                             stop as stop_daemon, stop_orphans)
@@ -29,6 +29,8 @@ from .config import (
     ensure_home,
     resolve_name,
     set_default_name,
+    set_share_stats,
+    share_stats_enabled,
 )
 from .client.context import gather as ctx_gather
 from .protocol import (DEFAULT_ROOM, MAX_FILE_BYTES, Envelope, KIND_CHAT,
@@ -64,6 +66,23 @@ def dim(msg: str) -> str:
 
 def heading(msg: str) -> None:
     print(f"\n{c(msg, '1')}")
+
+
+def _preflight_update(args: argparse.Namespace) -> None:
+    """Offer an update before a session starts.
+
+    Two agents on different versions can disagree about the wire format, so
+    starting or joining is exactly when this is worth raising. It never blocks:
+    offline, rate-limited, or nobody at the terminal all mean carry on.
+    """
+    if getattr(args, "no_update_check", False):
+        return
+    try:
+        info = update.check()
+    except Exception:
+        return
+    if info.available:
+        update.prompt_and_maybe_update(info, assume_yes=getattr(args, "update", False))
 
 
 def _warn_outside_venv() -> None:
@@ -113,7 +132,11 @@ def _print_snapshot(snapshot: dict[str, Any], me: str) -> None:
         role = " (host)" if p.get("is_host") else ""
         focus = f" — {p['focus']}" if p.get("focus") else ""
         repo = f" [{p['repo']}{'/' + p['branch'] if p.get('branch') else ''}]" if p.get("repo") else ""
-        print(f" {mark} {p['name']}{role}  {state}{repo}{focus}")
+        here = ""
+        if p["name"] != me and peers.same_machine(p):
+            # However they connected, they are on this box with this user.
+            here = c(" ⌂ same machine", "36")
+        print(f" {mark} {p['name']}{role}  {state}{repo}{focus}{here}")
 
     if tasks := snapshot.get("tasks"):
         heading("Open tasks")
@@ -135,10 +158,12 @@ def _short_state(state: str) -> str:
 
 def cmd_host(args: argparse.Namespace) -> int:
     _warn_outside_venv()
+    _preflight_update(args)
     ensure_home()
     name = resolve_name(args.name)
     port = args.port or free_port()
-    cfg = create_session(name, port, bind=args.bind, domain=args.domain)
+    cfg = create_session(name, port, bind=args.bind, domain=args.domain,
+                         title=args.title or args.focus or "")
 
     env = {**os.environ, "COLLAB_HOME": cfg.home}
     if args.no_tunnel:
@@ -189,16 +214,23 @@ def cmd_host(args: argparse.Namespace) -> int:
         name=cfg.host_name, host_name=cfg.host_name, token=cfg.host_token,
         is_host=True, room=DEFAULT_ROOM, home=cfg.home,
     )
+    # The listener recognises itself by id, so look ours up before it starts.
+    try:
+        with HubClient(profile.url, profile.token, timeout=5.0) as probe:
+            profile.participant_id = probe.participants().get("you_id", "")
+    except HubError:
+        pass
     profile.save()
     if orphans := stop_orphans(cfg.home, keep=cfg.session_id):
         ok(f"stopped {len(orphans)} leftover session listener(s)")
-    if args.focus:
-        try:
-            with HubClient(profile.url, profile.token) as client:
-                client.send(Envelope(kind=KIND_HELLO, sender=name, room=DEFAULT_ROOM,
-                                     text=args.focus, body=ctx_gather(args.focus)))
-        except HubError as exc:
-            warn(f"could not announce your focus: {exc}")
+    try:
+        # Always announce: it is what puts our repo, branch and focus on the
+        # roster, which is the first thing an arriving agent reads.
+        with HubClient(profile.url, profile.token) as client:
+            client.send(Envelope(kind=KIND_HELLO, sender=name, room=DEFAULT_ROOM,
+                                 text=args.focus, body=ctx_gather(args.focus)))
+    except HubError as exc:
+        warn(f"could not announce yourself: {exc}")
     status = onboard.ensure_daemon(profile) if not args.no_daemon else {}
     if status.get("state") == "live":
         ok("listening")
@@ -217,10 +249,29 @@ def cmd_host(args: argparse.Namespace) -> int:
 
 def cmd_join(args: argparse.Namespace) -> int:
     _warn_outside_venv()
+    _preflight_update(args)
     ensure_home()
+
+    url = args.url
+    if args.local or not url:
+        peer = peers.find(url or "")
+        if peer is None:
+            fail("no joinable collab session found on this machine")
+            print(dim("  `collab discover` lists what is running here"))
+            return 1
+        if not peer.joinable:
+            fail(f"{peer.session_id} is running here but is not the host, "
+                 "so it has no invite to hand out")
+            print(dim(f"  ask {peer.host_name or 'the host'} for a link, "
+                      "or run `collab discover`"))
+            return 1
+        url = peer.join_url()
+        ok(f"found {c(peer.session_id, '36')} hosted by {peer.name} "
+           f"in {Path(peer.repo).name}")
+
     try:
         profile, snapshot, status = onboard.join_session(
-            args.url, name=args.name, focus=args.focus,
+            url, name=args.name, focus=args.focus,
             start_daemon=not args.no_daemon,
         )
     except (ValueError, HubError) as exc:
@@ -254,6 +305,17 @@ def cmd_join(args: argparse.Namespace) -> int:
     return 0
 
 
+def _current_stats(profile: SessionProfile) -> dict[str, Any]:
+    """Whatever the host agent last told the status line about itself."""
+    if not share_stats_enabled():
+        return {}
+    path = profile.dir / "agent_stats.json"
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     profile = _require_profile(args)
     text = " ".join(args.text).strip()
@@ -264,6 +326,9 @@ def cmd_send(args: argparse.Namespace) -> int:
         kind=KIND_CHAT, text=text, sender=profile.name,
         room=None if args.to else (args.room or profile.room),
         to=args.to, thread=args.thread,
+        # Riding along with ordinary traffic is the cheapest way to keep
+        # everyone's view of quota current.
+        stats=_current_stats(profile),
     )
     try:
         with _client(profile) as client:
@@ -391,6 +456,108 @@ def cmd_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stat_bits(person: dict[str, Any]) -> list[str]:
+    stats = person.get("stats") or {}
+    bits = []
+    if stats.get("model"):
+        bits.append(str(stats["model"]))
+    if stats.get("cost_usd") is not None:
+        bits.append(f"${float(stats['cost_usd']):.2f}")
+    if stats.get("quota_five_hour") is not None:
+        bits.append(f"5h {float(stats['quota_five_hour']):.0f}%")
+    if stats.get("quota_seven_day") is not None:
+        bits.append(f"7d {float(stats['quota_seven_day']):.0f}%")
+    if stats.get("context_pct") is not None:
+        bits.append(f"ctx {float(stats['context_pct']):.0f}%")
+    return bits
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """What each agent has reported about its own usage.
+
+    This is what lets you hand the next task to whoever still has quota rather
+    than guessing.
+    """
+    if args.share is not None:
+        enabled = set_share_stats(args.share == "on")
+        ok(f"sharing your usage is now {'on' if enabled else 'off'}")
+        if not enabled:
+            print(dim("       others will keep seeing whatever you last shared"))
+        return 0
+
+    profile = _require_profile(args)
+    try:
+        with _client(profile) as client:
+            snapshot = client.participants()
+    except HubError as exc:
+        fail(str(exc))
+        return 1
+
+    people = snapshot.get("participants", [])
+    if args.json:
+        print(json.dumps({
+            "sharing": share_stats_enabled(),
+            "participants": [
+                {k: p.get(k) for k in
+                 ("name", "id", "is_host", "connected", "machine", "machine_id",
+                  "user", "focus", "repo", "branch", "stats")}
+                for p in people
+            ],
+        }, indent=2))
+        return 0
+
+    heading("Reported usage")
+    if not any(p.get("stats") for p in people):
+        print(dim("  nobody has shared any usage yet"))
+        print(dim("  agents share it automatically when their host tool exposes it"))
+    for p in people:
+        state = c("online", "32") if p.get("connected") else dim("offline")
+        here = c(" ⌂", "36") if peers.same_machine(p) else ""
+        print(f"  {c(p['name'], '1')}{' (host)' if p.get('is_host') else ''}"
+              f"  {state}{here}")
+        details = _stat_bits(p)
+        machine = p.get("machine")
+        if machine:
+            details.insert(0, str(machine))
+        print(f"      {dim(' · '.join(details)) if details else dim('nothing shared')}")
+    print()
+    print(dim(f"  you are {'sharing' if share_stats_enabled() else 'NOT sharing'} yours "
+              "(collab stats --share on|off)"))
+    print()
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """List collab sessions running on this machine."""
+    found = peers.discover(include_stale=args.all)
+    if args.json:
+        print(json.dumps([{**p.__dict__, "joinable": p.joinable,
+                           "alive": p.alive} for p in found], indent=2))
+        return 0
+
+    ident = peers.identity()
+    heading(f"collab on {ident['machine']} ({ident['user']})")
+    if not found:
+        print(dim("  nothing running here"))
+        print(dim("  start one with `collab host`, or join a remote session with "
+                  "`collab join <url>#<invite>`"))
+        return 0
+
+    for peer in found:
+        role = c("host", "32") if peer.role == "host" else "guest"
+        state = "" if peer.alive else dim(" (stale)")
+        print(f"  {c(peer.session_id, '36')}  {role}  as {c(peer.name, '1')}{state}")
+        print(f"      repo   {peer.repo}")
+        print(f"      hub    {peer.url}")
+        if peer.joinable:
+            print(f"      join   {dim('collab join --local ' + peer.session_id)}")
+        elif peer.role == "guest":
+            print(dim(f"      joined {peer.host_name or 'a remote host'} — "
+                      "no invite to pass on"))
+    print()
+    return 0
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     """A readable live transcript, for a person to leave open in a pane."""
     from .client import watch as w
@@ -418,6 +585,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
         ok(where)
         print(dim("  the conversation will appear there as it happens"))
         return 0
+
+    plain = args.plain or args.no_follow or not sys.stdout.isatty()
+    if not plain:
+        from .client import tui
+
+        try:
+            return tui.run(profile)
+        except KeyboardInterrupt:
+            return 0
+        except Exception as exc:
+            # A terminal that cannot do curses is a reason to fall back, not to
+            # fail: the plain renderer shows the same conversation.
+            warn(f"could not start the full view ({exc}); showing the plain one")
 
     try:
         return w.watch(profile, follow=not args.no_follow, limit=args.limit)
@@ -487,6 +667,20 @@ def cmd_file(args: argparse.Namespace) -> int:
         fail(str(exc))
         return 1
     return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    info = update.check(force=True)
+    if info.error and not info.latest:
+        warn(f"could not check for updates: {info.error}")
+        return 0
+    if not info.available:
+        ok(f"collab {info.current} is the latest release")
+        return 0
+    if args.check:
+        print(f"  collab {info.latest} is available (you have {info.current})")
+        return 0
+    return 0 if update.prompt_and_maybe_update(info, assume_yes=args.yes) else 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -567,9 +761,13 @@ def cmd_name(args: argparse.Namespace) -> int:
         try:
             with _client(profile) as client:
                 new = client.rename(final)
+            # The hub may have suffixed it to keep names unambiguous; take back
+            # whatever it actually assigned rather than assuming.
             profile.name = new
             profile.save()
             ok(f"renamed in the active session to {new}")
+            if is_running(profile) is not None:
+                print(dim("       the status line follows within a few seconds"))
         except HubError as exc:
             warn(f"could not rename in the active session: {exc}")
     return 0
@@ -673,17 +871,30 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--bind", default="127.0.0.1",
                    help="interface to bind; 0.0.0.0 exposes it on your LAN")
     h.add_argument("--focus", default="", help="what you are working on, shown to others")
+    h.add_argument("--title", default="",
+                   help="a name for the session, shown to everyone")
     h.add_argument("--domain", default="",
                    help="a reserved ngrok domain, so the URL survives a tunnel restart")
     h.add_argument("--no-tunnel", action="store_true", help="skip ngrok even if installed")
     h.add_argument("--no-daemon", action="store_true", help="do not start listening")
+    h.add_argument("--no-update-check", action="store_true",
+                   help="do not check for a newer collab first")
+    h.add_argument("--update", action="store_true",
+                   help="install a newer collab without asking, if there is one")
     h.set_defaults(func=cmd_host)
 
     j = sub.add_parser("join", help="join a session and start collaborating")
-    j.add_argument("url", help="the join URL, e.g. https://host#INVITE")
+    j.add_argument("url", nargs="?", default="",
+                   help="the join URL (https://host#INVITE), or a session id with --local")
+    j.add_argument("--local", action="store_true",
+                   help="join a session running on this machine, no link needed")
     j.add_argument("--name", help="your display name")
     j.add_argument("--focus", default="", help="what you are working on, announced on arrival")
     j.add_argument("--no-daemon", action="store_true", help="do not start listening")
+    j.add_argument("--no-update-check", action="store_true",
+                   help="do not check for a newer collab first")
+    j.add_argument("--update", action="store_true",
+                   help="install a newer collab without asking, if there is one")
     j.set_defaults(func=cmd_join)
 
     s = sub.add_parser("send", help="send a message")
@@ -738,6 +949,23 @@ def build_parser() -> argparse.ArgumentParser:
     add_session_flag(t)
     t.set_defaults(func=cmd_task)
 
+    stt = sub.add_parser("stats", help="what each agent reports about its own usage")
+    stt.add_argument("--json", action="store_true")
+    stt.add_argument("--share", choices=["on", "off"],
+                     help="share your own usage with the session (default: on)")
+    add_session_flag(stt)
+    stt.set_defaults(func=cmd_stats)
+
+    di = sub.add_parser("discover", help="collab sessions running on this machine")
+    di.add_argument("--all", action="store_true", help="include stale records")
+    di.add_argument("--json", action="store_true")
+    di.set_defaults(func=cmd_discover)
+
+    up = sub.add_parser("update", help="check for, and install, a newer collab")
+    up.add_argument("--check", action="store_true", help="only report, do not install")
+    up.add_argument("--yes", "-y", action="store_true", help="do not ask")
+    up.set_defaults(func=cmd_update)
+
     wa = sub.add_parser("watch", help="a readable live transcript of the conversation")
     wa.add_argument("--tmux", action="store_true",
                     help="open it in a new tmux pane instead of here")
@@ -746,6 +974,8 @@ def build_parser() -> argparse.ArgumentParser:
     wa.add_argument("--percent", type=int, default=35,
                     help="with --tmux, how much of the window to give the pane")
     wa.add_argument("--no-follow", action="store_true", help="print and exit")
+    wa.add_argument("--plain", action="store_true",
+                    help="scrolling text instead of the full-screen view")
     wa.add_argument("--limit", type=int, default=200, help="how much history to show")
     add_session_flag(wa)
     wa.set_defaults(func=cmd_watch)

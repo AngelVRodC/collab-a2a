@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..protocol import DEFAULT_ROOM, Envelope, KIND_PRESENCE
+from ..protocol import DEFAULT_ROOM, Envelope, KIND_HELLO, KIND_PRESENCE
 from .store import Store
 
 QUEUE_MAXSIZE = 1000
@@ -22,17 +22,27 @@ QUEUE_MAXSIZE = 1000
 
 @dataclass
 class Subscription:
-    participant: str
+    participant: str  # a participant id, never a display name
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(QUEUE_MAXSIZE))
 
 
 class Hub:
-    def __init__(self, store: Store, *, session_id: str, host_name: str) -> None:
+    def __init__(self, store: Store, *, session_id: str, host_name: str,
+                 title: str = "") -> None:
         self.store = store
         self.session_id = session_id
-        self.host_name = host_name
+        self.title = title
+        self._host_name = host_name
         self._subs: dict[str, list[Subscription]] = {}
         self._lock = asyncio.Lock()
+
+    @property
+    def host_name(self) -> str:
+        """Always the host's *current* name, which they may have changed."""
+        for p in self.store.participants():
+            if p.is_host:
+                return p.name
+        return self._host_name
 
     # --- subscriptions --------------------------------------------------------
 
@@ -60,6 +70,14 @@ class Hub:
 
     async def publish(self, env: Envelope) -> Envelope:
         """Persist, then push to every participant entitled to see it."""
+        if env.kind == KIND_HELLO and env.sender_id and env.body:
+            # The host announces itself the same way a guest does, so its repo,
+            # branch and focus show up in the roster like everyone else's.
+            await asyncio.to_thread(self.merge_hello, env.sender_id, env.body)
+        if env.stats and env.sender_id:
+            # Usage rides along with ordinary traffic; fold it into the sender's
+            # profile so the next roster everyone reads is already current.
+            await asyncio.to_thread(self.merge_stats, env.sender_id, env.stats)
         env = await asyncio.to_thread(self.store.append, env)
         await self._deliver(env)
         return env
@@ -83,50 +101,89 @@ class Hub:
                         sub.queue.put_nowait(env)
 
     @staticmethod
-    def _entitled(env: Envelope, name: str) -> bool:
+    def _entitled(env: Envelope, participant_id: str) -> bool:
         """A DM reaches only its two ends; anything else is room-wide.
+
+        Compared by id: a participant who renamed themselves keeps receiving
+        their own messages, and a DM addressed to a name someone else is still
+        holding from before the rename resolves to the same person.
 
         The sender gets their own message back too, which is what keeps every
         participant's local log identical and makes seq-based resume sound.
         """
-        if env.to:
-            return name in (env.to, env.sender)
+        if env.to_id or env.to:
+            return participant_id in (env.to_id, env.sender_id)
         return True
 
-    async def revoke(self, name: str) -> bool:
-        ok = await asyncio.to_thread(self.store.revoke, name)
+    async def revoke(self, participant_id: str) -> bool:
+        person = self.store.participant_by_id(participant_id)
+        name = person.name if person else participant_id
+        ok = await asyncio.to_thread(self.store.revoke, participant_id)
         if ok:
             async with self._lock:
-                subs = self._subs.pop(name, [])
+                subs = self._subs.pop(participant_id, [])
             for sub in subs:
                 # None is the close sentinel the SSE generator watches for.
                 with contextlib.suppress(asyncio.QueueFull):
                     sub.queue.put_nowait(None)
             await self.publish(Envelope(
-                kind=KIND_PRESENCE, sender=name, room=DEFAULT_ROOM,
+                kind=KIND_PRESENCE, sender=name, sender_id=participant_id,
+                room=DEFAULT_ROOM,
                 body={"event": "removed from the session"},
             ))
         return ok
 
+    def merge_hello(self, participant_id: str, hello: dict[str, Any]) -> None:
+        person = self.store.participant_by_id(participant_id)
+        if person is None:
+            return
+        meta = dict(person.meta)
+        meta.update({k: v for k, v in hello.items() if v not in ("", None)})
+        self.store.update_meta(participant_id, meta)
+
+    def merge_stats(self, participant_id: str, stats: dict[str, Any]) -> None:
+        person = self.store.participant_by_id(participant_id)
+        if person is None:
+            return
+        meta = dict(person.meta)
+        merged = dict(meta.get("stats") or {})
+        merged.update({k: v for k, v in stats.items() if k != "_identity"})
+        meta["stats"] = merged
+        for key in ("machine", "machine_id", "user"):
+            if stats.get(key):
+                meta[key] = stats[key]
+        self.store.update_meta(participant_id, meta)
+
     # --- snapshot -------------------------------------------------------------
 
     def snapshot(self, viewer: str | None = None, *, history: int = 20) -> dict[str, Any]:
-        """What a joining agent needs in order to say something useful at once."""
+        """What a joining agent needs in order to say something useful at once.
+
+        ``viewer`` is a participant id.
+        """
         connected = self.connected()
         people = []
         for p in self.store.participants():
             people.append({
+                "id": p.id,
                 "name": p.name,
                 "is_host": p.is_host,
-                "connected": p.name in connected,
+                "connected": p.id in connected,
                 "focus": p.meta.get("focus", ""),
                 "repo": p.meta.get("repo", ""),
                 "branch": p.meta.get("branch", ""),
+                "machine": p.meta.get("machine", ""),
+                "machine_id": p.meta.get("machine_id", ""),
+                "user": p.meta.get("user", ""),
+                "stats": p.meta.get("stats", {}),
             })
+        viewer_person = self.store.participant_by_id(viewer) if viewer else None
         return {
             "session_id": self.session_id,
+            "title": self.title,
             "host": self.host_name,
-            "you": viewer,
+            "you": viewer_person.name if viewer_person else None,
+            "you_id": viewer,
             "rooms": self.store.rooms() or [DEFAULT_ROOM],
             "participants": people,
             "tasks": self.store.tasks(open_only=True),

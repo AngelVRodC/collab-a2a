@@ -25,7 +25,8 @@ from typing import Any
 import httpx
 from httpx_sse import aconnect_sse
 
-from ..config import SessionProfile
+from .. import __version__, peers
+from ..config import SessionProfile, share_stats_enabled
 from ..protocol import EXT_PREFIX, Envelope
 from .bridge import Bridge
 from .inbox import Inbox
@@ -59,6 +60,10 @@ class DaemonPaths:
     @property
     def log(self) -> Path:
         return self.root / "daemon.log"
+
+    @property
+    def snapshot(self) -> Path:
+        return self.root / "snapshot.json"
 
 
 def is_running(profile: SessionProfile) -> int | None:
@@ -136,6 +141,7 @@ class Daemon:
         self.connected_since: float | None = None
         self.snapshot: dict[str, Any] = {}
         self._http: httpx.AsyncClient | None = None
+        self._last_stats: dict[str, Any] = {}
         self.failures = 0
         self._stop = asyncio.Event()
 
@@ -144,7 +150,11 @@ class Daemon:
     def write_status(self) -> None:
         """The status line reads only this file — never the network."""
         people = self.snapshot.get("participants", [])
-        others = [p for p in people if p.get("name") != self.profile.name]
+        # Identify ourselves by id: a display name we hold may be one rename
+        # behind, and then we would count ourselves among the others.
+        me = self.profile.participant_id
+        others = [p for p in people
+                  if (p.get("id") != me if me else p.get("name") != self.profile.name)]
         payload = {
             "session_id": self.profile.session_id,
             "name": self.profile.name,
@@ -161,6 +171,7 @@ class Daemon:
             "connected_since": self.connected_since,
             "failures": self.failures,
             "hint": self._hint(),
+            "version": __version__,
         }
         tmp = self.paths.status.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload))
@@ -176,12 +187,71 @@ class Daemon:
                     "(`collab url` on their side)")
         return ""
 
+    def _announce_locally(self) -> None:
+        """Publish this session in the machine-wide registry.
+
+        This is what lets an agent in another checkout on this machine find and
+        join the session without anyone pasting a link around.
+        """
+        invite = ""
+        if self.profile.is_host:
+            from ..server.session import HubConfig
+
+            cfg = HubConfig.load(self.profile.session_id, self.profile.home)
+            if cfg is not None:
+                invite = cfg.invite
+        try:
+            peers.announce(
+                session_id=self.profile.session_id,
+                name=self.profile.name,
+                role="host" if self.profile.is_host else "guest",
+                url=self.profile.url,
+                repo=str(Path(self.profile.home).parent),
+                home=self.profile.home,
+                participant_id=self.profile.participant_id,
+                invite=invite,
+                host_name=self.profile.host_name,
+            )
+        except OSError:
+            pass
+
+    async def _report_stats(self, client: httpx.AsyncClient) -> None:
+        """Tell the hub where we are running, and what we know about our usage.
+
+        The usage half is whatever the agent happens to expose — Claude Code
+        hands its status line a cost and rate-limit snapshot, which the status
+        line drops in a file for us. Anything absent is simply not reported.
+        """
+        if not share_stats_enabled():
+            return
+        payload = {**peers.identity(), "stats": {}}
+        stats_file = self.paths.root / "agent_stats.json"
+        try:
+            if stats_file.exists():
+                payload["stats"] = json.loads(stats_file.read_text())
+        except (OSError, ValueError):
+            payload["stats"] = {}
+        if payload == self._last_stats:
+            return
+        try:
+            r = await client.post(
+                f"{self.profile.url}{EXT_PREFIX}/stats",
+                headers={"Authorization": f"Bearer {self.profile.token}"},
+                json=payload, timeout=10.0,
+            )
+            if r.status_code == 200:
+                self._last_stats = payload
+        except httpx.HTTPError:
+            pass
+
     async def _heartbeat_loop(self) -> None:
         last_refresh = 0.0
         while not self._stop.is_set():
+            self._announce_locally()
             if (time.time() - last_refresh) > SNAPSHOT_REFRESH and self.state == "live":
                 if self._http is not None:
                     await self._refresh_snapshot(self._http)
+                    await self._report_stats(self._http)
                 last_refresh = time.time()
             self.write_status()
             with contextlib.suppress(asyncio.TimeoutError):
@@ -196,8 +266,38 @@ class Daemon:
             )
             if r.status_code == 200:
                 self.snapshot = r.json()
+                self._adopt_identity()
+                # The viewer reads this instead of the network, so it keeps
+                # working while the hub is briefly unreachable.
+                try:
+                    tmp = self.paths.root / "snapshot.tmp"
+                    tmp.write_text(json.dumps(self.snapshot))
+                    tmp.replace(self.paths.root / "snapshot.json")
+                except OSError:
+                    pass
         except httpx.HTTPError:
             pass
+
+    def _adopt_identity(self) -> None:
+        """Take our current name and id from the hub.
+
+        We may have renamed ourselves — possibly from another terminal — and a
+        stale copy of our own name would make us count ourselves as somebody
+        else, which is what turns the roster into "alone".
+        """
+        changed = False
+        if (pid := self.snapshot.get("you_id")) and pid != self.profile.participant_id:
+            self.profile.participant_id = pid
+            changed = True
+        if (name := self.snapshot.get("you")) and name != self.profile.name:
+            logger.info("our display name is now %s", name)
+            self.profile.name = name
+            changed = True
+        if (host := self.snapshot.get("host")) and host != self.profile.host_name:
+            self.profile.host_name = host
+            changed = True
+        if changed:
+            self.profile.save()
 
     def _follow_url_change(self) -> None:
         """Pick up a new public address the hub recorded while we were away.
@@ -272,6 +372,7 @@ class Daemon:
             await self.bridge.stop()
             self.state = "stopped"
             self.write_status()
+            peers.withdraw(self.profile.session_id)
             with contextlib.suppress(OSError):
                 self.paths.pid.unlink()
 
@@ -345,7 +446,9 @@ class Daemon:
                     continue
                 if self.inbox.record(env):
                     await self.bridge.broadcast(env)
-                    if env.kind in ("hello", "presence"):
+                    if env.kind in ("hello", "presence", "system"):
+                        # A rename, an arrival or a departure all change the
+                        # roster, so re-read it rather than showing stale names.
                         await self._refresh_snapshot(client)
                     self.write_status()
 

@@ -22,6 +22,22 @@ throw away everything after it.
 
 If collab is not installed, follow `AGENT_INSTALL.md` first.
 
+**If the join is refused** with *the name is already taken*, someone in the
+session already answers to it. Names are unique so a direct message is never a
+guess — pick another and tell the user which you used:
+
+```bash
+.venv/bin/collab join '<url>' --name <another>
+```
+
+**No link at all?** If the other agent is on this same machine you do not need
+one — see the `collab-discover` skill, or just:
+
+```bash
+.venv/bin/collab discover
+.venv/bin/collab join --local
+```
+
 That single command joins, announces you, starts the listener, and prints the
 session snapshot. There is no separate step to start receiving.
 
@@ -101,7 +117,25 @@ Do not wait to be spoken to. Reference what the snapshot told you:
 - `no active collab session` means you are in a different repo — state lives in
   `<repo>/.collab/`.
 
+## Dividing work on evidence, not guesswork
+
+Every agent reports what it knows about its own usage — model, spend, quota,
+context — and the whole session can read it:
+
+```bash
+.venv/bin/collab stats --json
+```
+
+Use it before handing out anything long: if one agent is at 90% of its 5-hour
+limit and another is at 12%, give the work to the second and say why. That is
+the entire reason the figures are shared.
+
+`⌂ same machine` in `collab who` means that agent is on this computer under this
+user. You can pass it a path rather than a file, and you are competing for the
+same CPU and ports.
+
 ## Showing the user what is happening
 
-If the user wants to follow the conversation themselves, `collab watch --tmux`
-opens it in a pane beside their work. See the `collab-watch` skill.
+`collab watch --tmux` opens a full-screen view beside their work: the roster
+with everyone's quota on top, the conversation below. See the `collab-watch`
+skill.

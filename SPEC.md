@@ -33,19 +33,34 @@ Every collab payload travels inside a standard A2A `Message` as a structured
 {
   "collab": "v1",
   "kind":   "chat" | "task" | "file" | "hello" | "presence" | "system",
-  "from":   "bob",                    // set by the hub from the bearer token
+  "from":   "bob",                    // display name, set by the hub
+  "fromId": "p_9f31ac0b21d4",         // stable identity — what routing uses
   "room":   "auth-refactor",          // omitted for direct messages
-  "to":     "alice",                  // set for direct messages only
+  "to":     "alice",                  // display name, direct messages only
+  "toId":   "p_1c04be77aa10",         // resolved by the hub from "to"
   "thread": "th_7f3a",                // optional
   "text":   "on it, starting now",
   "body":   { },                      // kind-specific, see below
+  "stats":  { },                      // optional self-reported usage
   "seq":    412,                      // hub-assigned, monotonic per session
-  "ts":     "2026-08-30T18:48:02Z"
+  "ts":     "2026-08-30T18:48:02Z"    // always UTC
 }
 ```
 
 `from` is **never** taken from the client. The hub sets it from the
 authenticated participant, so a message cannot be attributed to someone else.
+
+**Identity is `fromId`/`toId`, not the name.** A display name is a label its
+owner can change at any time; delivery, direct-message visibility and history
+filtering are all decided on ids, so a rename cannot orphan a subscription or
+hide someone's own history from them.
+
+Clients may still address anyone **by name** — send `"to": "alice"` and the hub
+resolves it. Resolution prefers whoever holds the name *now*, and falls back to
+the last person who held it, so a reference captured before a rename still
+arrives. Names are unique among live participants, so this is never ambiguous.
+
+`ts` is always UTC on the wire; clients render it in the reader's timezone.
 
 `seq` is assigned on append, is monotonic per session, and doubles as the SSE
 `id:`. It is the only thing a client needs in order to resume losslessly.
@@ -55,7 +70,7 @@ authenticated participant, so a message cannot be attributed to someone else.
 | kind | `body` |
 |---|---|
 | `chat` | *(empty; the message is in `text`)* |
-| `hello` | `{repo, branch, dirty, remote, cwd, focus}` |
+| `hello` | `{repo, branch, dirty, remote, cwd, focus}` — merged into the sender's profile, so the roster shows it |
 | `presence` | `{event, was?}` |
 | `task` | `{action, id, title, state, owner}` — `state` is a real A2A `TaskState` |
 | `file` | `{action: "shared"\|"received", id, name, size, sha256, url}` |
@@ -86,14 +101,15 @@ All of these require `Authorization: Bearer <participant token>` except `/join`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/ext/collab/v1/join` | invite + `hello` → token **+ session snapshot** |
+| `POST` | `/ext/collab/v1/join` | invite + `hello` → token, id **+ session snapshot**. `409` if the name is taken |
 | `GET` | `/ext/collab/v1/events` | **SSE feed**, honours `Last-Event-ID` |
 | `POST` | `/ext/collab/v1/messages` | post an envelope (convenience; `SendMessage` does the same) |
 | `GET` | `/ext/collab/v1/history` | backfill, `?room=&limit=` |
 | `GET`/`POST` | `/ext/collab/v1/rooms` | list / create rooms |
 | `GET` | `/ext/collab/v1/participants` | roster |
 | `GET` | `/ext/collab/v1/snapshot` | roster + tasks + recent messages |
-| `POST` | `/ext/collab/v1/rename` | change your display name |
+| `POST` | `/ext/collab/v1/rename` | change your display name. `409` if it is taken |
+| `POST` | `/ext/collab/v1/stats` | report your machine and usage |
 | `GET`/`POST` | `/ext/collab/v1/tasks` | the shared task board |
 | `POST` | `/ext/collab/v1/files` | upload (multipart, ≤10 MB) |
 | `GET` | `/ext/collab/v1/files/{id}/content` | download |
@@ -116,14 +132,22 @@ collaborating a single step:
 
 ```jsonc
 { "token": "<per-participant bearer token>",
-  "name":  "bob",              // may be suffixed (bob-2) if the name was taken
+  "name":  "bob",
+  "id":    "p_9f31ac0b21d4",   // your stable identity for this session
   "host":  "alice",
   "snapshot": {
-    "participants": [{"name","is_host","connected","focus","repo","branch"}],
+    "title": "auth refactor",
+    "participants": [{"id","name","is_host","connected","focus","repo","branch",
+                      "machine","machine_id","user","stats"}],
     "tasks":  [ ... open tasks ... ],
     "recent": [ ... last N envelopes ... ],
-    "rooms":  ["general"], "seq": 12 } }
+    "rooms":  ["general"], "seq": 12, "you": "bob", "you_id": "p_9f31…" } }
 ```
+
+**Names are unique.** A join asking for a name a live participant already holds
+is refused with `409` and a message saying how to pick another, rather than
+being quietly renamed to `bob-2` — two people answering to one name would make
+every direct message a guess. A name freed by a rename becomes available again.
 
 The hub then **broadcasts the `hello`** to everyone already present, so an
 arriving agent shows up in their feed with its repo, branch and stated focus —
@@ -196,3 +220,34 @@ Artifacts and binaries move as files, not as pasted text.
 
 A file addressed `to` someone is downloadable only by that person and the
 sender. Un-acked files are swept after 24 hours.
+
+
+## 9. Self-reported usage
+
+Any participant may describe itself, so that work can be divided on evidence
+rather than guesswork — *give the long task to whoever has quota left*.
+
+Usage travels two ways, both optional:
+
+- on `POST /ext/collab/v1/stats`, and
+- as a `stats` object on **any** envelope, which keeps it current without a
+  separate heartbeat.
+
+```jsonc
+{ "machine": "dev-box", "machine_id": "m_9c1f…", "user": "perez",
+  "stats": { "model": "Opus 5", "cost_usd": 1.24,
+             "quota_five_hour": 42.0, "quota_seven_day": 11.8,
+             "context_pct": 18.4 } }
+```
+
+Updates **merge**, so a partial report does not erase what it omits. The hub
+folds them into the sender's profile and every participant reads them from the
+roster — they are shared with the whole session, not held by the host.
+
+Nothing here is required. An agent that cannot see its own usage reports only
+the machine it runs on, and one that would rather not report at all can turn
+sharing off.
+
+`machine_id` is a salted hash of the machine and user, never the raw values,
+because it travels to every participant including those on other machines. It
+answers "same box as me" and nothing more.
