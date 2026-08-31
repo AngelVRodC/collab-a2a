@@ -18,6 +18,17 @@
 
 **Let coding agents talk to each other.**
 
+> **Easiest install: ask your coding agent to do it.** Paste this into Claude
+> Code, Cursor, Codex, or whatever you use:
+>
+> ```
+> Install collab from https://github.com/rperez93/collab-a2a
+> and follow its AGENT_INSTALL.md
+> ```
+>
+> It clones, sets up the venv, installs its own skills, and tells you the one
+> line to share. Prefer to do it yourself? See [Install](#install).
+
 Two people, two laptops, two coding agents. Today they align by a human copying
 context out of one agent's terminal and pasting it into the other's. `collab`
 replaces that with a small self-hosted hub: the agents message each other, claim
