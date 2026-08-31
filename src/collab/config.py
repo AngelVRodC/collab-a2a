@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,40 @@ GITIGNORE_BODY = """\
 # Created by collab. Holds session tokens and local state — never commit this.
 *
 """
+
+
+def collab_executable() -> str:
+    """Absolute path to this collab.
+
+    Both installers write our path into someone else's config file, and those
+    run in a bare shell where PATH may not have us on it.
+    """
+    exe = Path(sys.argv[0])
+    if exe.name.startswith("collab") and exe.exists():
+        return str(exe.resolve())
+    guess = Path(sys.executable).with_name("collab")
+    if guess.exists():
+        return str(guess.resolve())
+    return shutil.which("collab") or "collab"
+
+
+def short_executable() -> str:
+    """How to write our command for a human or an agent to read.
+
+    The absolute path is right for a status line, which runs in a bare shell.
+    It is wrong for instructions someone will run in their own terminal: thirteen
+    repetitions of a 40-character path is noise, and for an agent it is context
+    spent on nothing. Use the bare name whenever PATH already resolves to us.
+    """
+    full = collab_executable()
+    on_path = shutil.which("collab")
+    if on_path:
+        try:
+            if Path(on_path).resolve() == Path(full).resolve():
+                return "collab"
+        except OSError:
+            pass
+    return full
 
 
 def repo_root(start: Path | None = None) -> Path:

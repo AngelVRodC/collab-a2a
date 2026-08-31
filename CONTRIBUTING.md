@@ -98,6 +98,13 @@ bug, not a feature.
 It is easy to add a new read path and forget; `test_replayed_dms_stay_private`
 guards it.
 
+**Anything written into someone else's config is additive and marked.** Skills,
+instructions files, status line scripts, tmux config — all of it belongs to the
+user, not to us. Insert a marker-delimited block, back the file up first, never
+remove or reorder what is already there, and make re-running replace our block
+rather than add a second. `tests/test_statusline_install.py` and
+`tests/test_skills.py` exist to keep that true.
+
 **Global settings belong to the person, session state to the repo.** A new
 preference goes in `~/.config/collab/config.json` behind a getter and setter in
 `config.py`, and gets a CLI flag — never ask anyone to edit that file by hand.

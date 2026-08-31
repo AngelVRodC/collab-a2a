@@ -49,15 +49,9 @@ def settings_path(scope: str = "global") -> Path:
     return claude_dir() / "settings.json"
 
 
-def collab_executable() -> str:
-    """Absolute path to this collab, since the status line runs in a bare shell."""
-    exe = Path(sys.argv[0])
-    if exe.name.startswith("collab") and exe.exists():
-        return str(exe.resolve())
-    guess = Path(sys.executable).with_name("collab")
-    if guess.exists():
-        return str(guess.resolve())
-    return shutil.which("collab") or "collab"
+#: Shared with the skills installer — both write our path into a config file
+#: that will be read by a bare shell.
+from ..config import collab_executable  # noqa: E402  (re-exported)
 
 
 def build_block(executable: str, *, separator: bool) -> str:
@@ -111,6 +105,7 @@ class InstallResult:
     settings: Path
     backups: list[Path]
     notes: list[str]
+    label: str = ""
 
 
 def _load_settings(path: Path) -> dict[str, Any]:
@@ -404,21 +399,42 @@ TARGETS = {
     "generic": "print wiring instructions for any other host",
 }
 
+#: Agents that are installed here but have nowhere to put a status line. Naming
+#: them is more useful than silence: without it, someone who runs Codex and
+#: Claude Code cannot tell whether collab skipped Codex deliberately or missed
+#: it. Each entry is (config directory, label, why).
+UNSUPPORTED = (
+    (".codex", "Codex CLI", "has no status line or plugin hook"),
+    (".gemini", "Gemini CLI", "statusline is still a feature request"),
+    (".config/opencode", "opencode", "has a plugin hook, but no shell one"),
+    (".cursor", "Cursor", "no user-scriptable status line"),
+)
+
+
+def unsupported_agents() -> list[tuple[str, str]]:
+    """Agents present on this machine that cannot host a status line."""
+    home = Path(os.environ.get("COLLAB_AGENT_HOME") or Path.home())
+    return [(label, why) for rel, label, why in UNSUPPORTED
+            if (home / rel).exists()]
+
 
 def detect_targets() -> list[str]:
-    """Which hosts look present on this machine."""
+    """Which status line hosts are present on this machine.
+
+    Every one of them, not the first: someone running Claude Code inside tmux
+    wants the segment in both, and picking one silently is a worse answer than
+    doing what they asked.
+    """
     found = []
-    if (claude_dir() / "settings.json").exists() or claude_dir().exists():
+    if claude_dir().exists():
         found.append("claude-code")
     if shutil.which("tmux"):
         found.append("tmux")
     return found or ["generic"]
 
 
-def install(target: str = "auto", scope: str = "global",
-            *, executable: str | None = None) -> InstallResult:
-    if target == "auto":
-        target = detect_targets()[0]
+def install_one(target: str, scope: str = "global",
+                *, executable: str | None = None) -> InstallResult:
     if target == "claude-code":
         return install_claude_code(scope, executable=executable)
     if target == "tmux":
@@ -427,17 +443,33 @@ def install(target: str = "auto", scope: str = "global",
                          generic_snippet(executable).splitlines())
 
 
-def uninstall(target: str = "auto", scope: str = "global") -> InstallResult:
-    if target == "auto":
-        target = detect_targets()[0]
-    if target == "tmux":
-        return uninstall_tmux()
-    return uninstall_claude_code(scope)
+def install(target: str = "auto", scope: str = "global",
+            *, executable: str | None = None) -> list[InstallResult]:
+    """Install into every detected host, or just the one named."""
+    targets = detect_targets() if target == "auto" else [target]
+    results = []
+    for one in targets:
+        result = install_one(one, scope, executable=executable)
+        result.label = TARGETS.get(one, one)
+        results.append(result)
+    return results
+
+
+def uninstall(target: str = "auto", scope: str = "global") -> list[InstallResult]:
+    targets = detect_targets() if target == "auto" else [target]
+    results = []
+    for one in targets:
+        result = uninstall_tmux() if one == "tmux" else uninstall_claude_code(scope)
+        result.label = TARGETS.get(one, one)
+        results.append(result)
+    return results
 
 
 def status(target: str = "auto", scope: str = "global") -> dict[str, Any]:
     if target == "auto":
         return {"detected": detect_targets(),
+                "unsupported": [{"agent": label, "why": why}
+                                for label, why in unsupported_agents()],
                 "claude-code": status_claude_code(scope),
                 "tmux": status_tmux()}
     if target == "tmux":

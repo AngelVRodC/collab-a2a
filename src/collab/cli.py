@@ -1031,27 +1031,58 @@ def cmd_skills(args: argparse.Namespace) -> int:
     from . import skills as sk
 
     if args.action == "status":
-        print(json.dumps(sk.status(), indent=2))
+        if args.json:
+            print(json.dumps(sk.status(), indent=2))
+            return 0
+        report = sk.status()
+        heading("collab guidance, per agent")
+        for key, entry in report["agents"].items():
+            if not entry["present"] and not args.all:
+                continue
+            mark = c("installed", "32") if entry["installed"] else dim("not installed")
+            here = "" if entry["present"] else dim("  (agent not on this machine)")
+            print(f"  {c(entry['label'], '1'):<24} {mark}{here}")
+            print(f"      {dim(str(entry['path']))}")
+        if not args.all:
+            print(dim("\n  --all also lists agents that are not installed here"))
+        print()
         return 0
+
     try:
-        result = (sk.uninstall() if args.action == "uninstall"
-                  else sk.install(copy=args.copy, force=args.force))
+        results = (sk.uninstall(agent=args.agent) if args.action == "uninstall"
+                   else sk.install(copy=args.copy, force=args.force,
+                                   agent=args.agent))
     except RuntimeError as exc:
         fail(str(exc))
         return 1
 
-    verb = "removed" if args.action == "uninstall" else (
-        "linked" if result.linked else "installed")
-    if result.installed:
-        ok(f"{verb} {len(result.installed)} skills into {result.target}")
-        for name in result.installed:
-            print(f"       {dim(name)}")
-    else:
-        warn(f"nothing to {args.action} in {result.target}")
-    for name in result.skipped:
-        warn(f"{name} already exists and was not written — pass --force to replace it")
-    if args.action == "install" and result.installed:
-        print(dim("       restart your agent so it picks the skills up"))
+    if not results:
+        warn("no coding agents detected on this machine")
+        print(dim("  collab looks for Claude Code, Codex, Gemini CLI, opencode,"))
+        print(dim("  Cursor, Windsurf, Amp, Crush and Goose by their config directories"))
+        print(dim("  `collab skills status --all` shows every one it knows"))
+        return 0
+
+    for result in results:
+        if result.note:
+            warn(f"{result.label}: {result.note}")
+            continue
+        if not result.installed:
+            warn(f"{result.label}: nothing to {args.action}")
+            continue
+        if result.kind == "skills":
+            verb = "removed" if args.action == "uninstall" else (
+                "linked" if result.linked else "installed")
+            ok(f"{result.label}: {verb} {plural(len(result.installed), 'skill')}")
+        else:
+            what = result.installed[0]
+            ok(f"{result.label}: {what} its instructions")
+        print(f"       {dim(str(result.target))}")
+        for name in result.skipped:
+            warn(f"  {name} was already there and is not ours — --force replaces it")
+
+    if args.action == "install":
+        print(dim("       restart those agents so they pick it up"))
     return 0
 
 
@@ -1074,25 +1105,97 @@ def cmd_statusline(args: argparse.Namespace) -> int:
         print(json.dumps(sli.status(args.agent, args.scope), indent=2))
         return 0
     try:
-        result = (sli.uninstall(args.agent, args.scope) if args.action == "uninstall"
-                  else sli.install(args.agent, args.scope))
+        results = (sli.uninstall(args.agent, args.scope) if args.action == "uninstall"
+                   else sli.install(args.agent, args.scope))
     except RuntimeError as exc:
         fail(str(exc))
         return 1
-    if result.action == "instructions":
-        print("\n".join(result.notes))
-        return 0
-    ok(f"{result.action}: {result.script}")
-    for note in result.notes:
-        print(f"       {dim(note)}")
-    for b in result.backups:
-        print(f"       {dim('backup: ' + str(b))}")
-    if result.action not in ("absent",):
-        print(dim("       restart Claude Code, or it will keep the old status line"))
+
+    for result in results:
+        if result.action == "instructions":
+            print("\n".join(result.notes))
+            continue
+        ok(f"{result.label or 'status line'}: {result.action} {result.script}")
+        for note in result.notes:
+            print(f"       {dim(note)}")
+        for b in result.backups:
+            print(f"       {dim('backup: ' + str(b))}")
+
+    if args.action == "install" and any(r.action not in ("instructions", "absent")
+                                        for r in results):
+        print(dim("       restart those hosts, or they keep the old status line"))
+
+    # Say what was skipped and why: a missing segment should never be a mystery.
+    for label, why in sli.unsupported_agents():
+        print(dim(f"       {label}: no status line — {why}"))
     return 0
 
 
 # --- parser --------------------------------------------------------------------
+
+#: What each command is for, grouped the way you actually reach for them.
+COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Start or join a session", [
+        ("host", "start a session and print a link to share"),
+        ("join <url>#<invite>", "join someone else's session"),
+        ("join --local", "join a session already running on this machine"),
+        ("discover", "collab sessions running on this machine"),
+        ("sessions", "sessions this repo has hosted before"),
+        ("kill", "end a session (its history is kept)"),
+    ]),
+    ("Talk", [
+        ("send <text>", "post to the room, or --to NAME for a direct message"),
+        ("listen --follow", "stream events as lines — what an agent watches"),
+        ("recv --wait N", "drain unread, waiting up to N seconds"),
+        ("watch", "a live view for a person: roster and conversation"),
+        ("rooms", "list or create rooms"),
+    ]),
+    ("Align on work", [
+        ("task propose|claim|complete", "the shared task board"),
+        ("who", "who is here, their focus, repo and machine"),
+        ("stats", "each agent's quota and spend, for splitting work"),
+        ("file send|get", "hand over artifacts instead of pasting them"),
+    ]),
+    ("Yourself and this install", [
+        ("status", "your connection state and how to watch it"),
+        ("name [value]", "show or set your display name"),
+        ("url", "reprint the join line (host)"),
+        ("kick <name>", "remove a participant (host)"),
+        ("daemon start|stop|status", "the listener that holds the connection"),
+        ("skills install", "teach your coding agents to use collab"),
+        ("statusline install", "show connection state in your status bar"),
+        ("update", "check for, and install, a newer collab"),
+    ]),
+]
+
+
+def print_overview() -> None:
+    """What someone typing `collab` with nothing else needs to see.
+
+    argparse's own error ("the following arguments are required") tells you
+    that you did something wrong and nothing about what you could do instead.
+    """
+    print(f"\n{c('collab', '1;36')} {dim(__version__)} — "
+          "let coding agents talk to each other\n")
+
+    profile = SessionProfile.current()
+    if profile is not None:
+        state = read_status(profile).get("state", "?")
+        where = (f"{profile.name} (host)" if profile.name == profile.host_name
+                 else f"{profile.name} → {profile.host_name}")
+        print(f"  in session {c(profile.session_id, '36')} as {where} · {state}\n")
+    else:
+        print(f"  {dim('no active session here — `collab host` starts one')}\n")
+
+    for title, entries in COMMAND_GROUPS:
+        print(f"  {c(title, '1')}")
+        for name, blurb in entries:
+            print(f"    {name:<28} {dim(blurb)}")
+        print()
+
+    print(dim("  collab <command> --help   detail on any one of them"))
+    print(dim("  https://github.com/rperez93/collab-a2a\n"))
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -1100,7 +1203,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="An A2A hub that lets coding agents talk, align on tasks, and discuss work.",
     )
     p.add_argument("--version", action="version", version=f"collab {__version__}")
-    sub = p.add_subparsers(dest="command", required=True)
+    # Not required: a bare `collab` prints an overview instead of an error.
+    sub = p.add_subparsers(dest="command")
 
     def add_session_flag(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--session", help="act on this session id instead of the current one")
@@ -1293,12 +1397,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_session_flag(d)
     d.set_defaults(func=cmd_daemon)
 
-    sk = sub.add_parser("skills", help="install collab's skills into your coding agent")
+    sk = sub.add_parser("skills",
+                        help="teach your coding agents to use collab")
     sk.add_argument("action", choices=["install", "uninstall", "status"])
+    sk.add_argument("--agent", metavar="NAME",
+                    help="just this agent (default: every one detected here)")
     sk.add_argument("--copy", action="store_true",
                     help="copy the skills instead of symlinking them")
     sk.add_argument("--force", action="store_true",
                     help="replace skills of the same name that are already there")
+    sk.add_argument("--all", action="store_true",
+                    help="with status, also list agents not installed here")
+    sk.add_argument("--json", action="store_true")
     sk.set_defaults(func=cmd_skills)
 
     sl = sub.add_parser("statusline", help="the Claude Code status line segment")
@@ -1318,6 +1428,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if not getattr(args, "command", None):
+        print_overview()
+        return 0
     try:
         return int(args.func(args) or 0)
     except KeyboardInterrupt:

@@ -1,19 +1,33 @@
-"""Installing collab's agent skills into a coding agent.
+"""Installing collab's guidance into whatever coding agents are on the machine.
 
 The skills live in ``src/collab/skills/`` and ship inside the package, so they
 travel with an install rather than only existing in a checkout — there is one
 copy, not a repo copy and a packaged copy drifting apart.
 
-Installation is a symlink by default, so a skill edited in a checkout is live
-immediately, with a copy as the fallback where linking is unavailable.
+Agents take instructions in two different shapes, and the difference matters:
+
+* **Skill directories** (Claude Code): a set of files loaded only when relevant.
+  These get the whole skills, symlinked so a checkout edit is live immediately.
+* **A single instructions file** (Codex, Gemini CLI, opencode, Cursor): read on
+  *every* prompt. Pasting four full skills there would spend someone's context
+  budget on collab whether or not they are using it, so these get a short block
+  that says collab exists, gives the handful of commands, and points at the
+  full skills on disk for the detail.
+
+Every write is additive and marker-delimited, the same discipline the status
+line installer uses: nothing already in the file is removed or reordered.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from .config import collab_executable, short_executable
 
 SKILL_NAMES = ("collab-host", "collab-join", "collab-watch",
                "collab-discover")
@@ -30,21 +44,120 @@ def claude_skills_dir() -> Path:
     return base / "skills"
 
 
+BEGIN = "<!-- >>> COLLAB (managed by `collab skills install`) — do not edit by hand -->"
+END = "<!-- <<< COLLAB -->"
+BLOCK_RE = re.compile(r"\n?<!-- >>> COLLAB .*?-->.*?<!-- <<< COLLAB -->\n?", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class Target:
+    """One agent, and where it expects to be told things."""
+
+    key: str
+    label: str
+    kind: str        # "skills" (a directory of skills) or "file" (instructions)
+    path: Path       # the skills directory, or the instructions file
+    marker: Path     # what must exist for this agent to count as installed
+
+
+def _home() -> Path:
+    return Path.home()
+
+
+def known_targets() -> list[Target]:
+    """Every agent collab knows how to write to, present or not."""
+    claude_base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (_home() / ".claude"))
+    home = Path(os.environ.get("COLLAB_AGENT_HOME") or _home())
+    return [
+        Target("claude-code", "Claude Code", "skills",
+               claude_base / "skills", claude_base),
+        Target("codex", "Codex CLI", "file",
+               home / ".codex" / "AGENTS.md", home / ".codex"),
+        Target("gemini", "Gemini CLI", "file",
+               home / ".gemini" / "GEMINI.md", home / ".gemini"),
+        Target("opencode", "opencode", "file",
+               home / ".config" / "opencode" / "AGENTS.md",
+               home / ".config" / "opencode"),
+        Target("cursor", "Cursor", "file",
+               home / ".cursor" / "rules" / "collab.mdc", home / ".cursor"),
+        Target("windsurf", "Windsurf", "file",
+               home / ".codeium" / "windsurf" / "memories" / "collab.md",
+               home / ".codeium" / "windsurf"),
+        Target("amp", "Amp", "file",
+               home / ".config" / "amp" / "AGENTS.md", home / ".config" / "amp"),
+        Target("crush", "Crush", "file",
+               home / ".config" / "crush" / "AGENTS.md", home / ".config" / "crush"),
+        Target("goose", "Goose", "file",
+               home / ".config" / "goose" / ".goosehints",
+               home / ".config" / "goose"),
+    ]
+
+
+def detect_targets() -> list[Target]:
+    """The agents actually installed here.
+
+    Presence is judged by the agent's own config directory, not by a binary on
+    PATH: an agent installed through an IDE may have no command at all, and
+    writing into a directory it does not have would just be litter.
+    """
+    return [t for t in known_targets() if t.marker.exists()]
+
+
+def instructions_block(skills_dir: Path, executable: str) -> str:
+    """The short version, for agents that read one file on every prompt."""
+    names = ", ".join(f"`{n}`" for n in SKILL_NAMES)
+    return f"""{BEGIN}
+## collab — talking to other coding agents
+
+`collab` connects this agent to other people's coding agents over the A2A
+protocol: real-time messages, a shared task board, file transfer, and usage
+figures so work can be split by who has quota left.
+
+**Only relevant when the user asks to collaborate with another agent or
+person.** Ignore it otherwise.
+
+```bash
+{executable} host                  # start a session; prints a link to share
+{executable} join '<url>#<invite>' # join one (quote it — the # matters)
+{executable} join --local          # join a session already running on this machine
+{executable} discover              # what is running on this machine
+{executable} listen --follow       # stream incoming messages (watch this)
+{executable} recv --wait 60        # or poll, if you cannot watch a stream
+{executable} send "..."            # post to the room
+{executable} send --to NAME "..."  # direct message
+{executable} who                   # who is here, their focus and machine
+{executable} stats --json          # each agent's quota and spend
+{executable} task propose|claim|complete
+{executable} file send|get         # artifacts, not pasted text
+{executable} kill                  # end the session (data kept)
+```
+
+`{executable}` on its own lists every command.
+
+**Working agreement:** claim a task before starting it; say which files you are
+touching; answer direct messages; send artifacts as files rather than pasting
+them; never paste secrets — everyone in the room sees room messages.
+
+Full instructions: `{skills_dir}` ({names}).
+{END}"""
+
+
 @dataclass
 class SkillResult:
     installed: list[str]
     skipped: list[str]
     target: Path
     linked: bool
+    label: str = ""
+    kind: str = "skills"
+    note: str = ""
 
 
-def install(*, target: Path | None = None, copy: bool = False,
-            force: bool = False) -> SkillResult:
+def _install_skills_dir(dest_root: Path, *, copy: bool, force: bool) -> SkillResult:
+    """Claude Code style: one directory per skill, loaded when relevant."""
     source = bundled_skills_dir()
     if source is None:
         raise RuntimeError("could not find collab's bundled skills")
-
-    dest_root = target or claude_skills_dir()
     dest_root.mkdir(parents=True, exist_ok=True)
 
     installed, skipped, linked_any = [], [], False
@@ -76,11 +189,89 @@ def install(*, target: Path | None = None, copy: bool = False,
                 shutil.copytree(src, dest)
         installed.append(name)
 
-    return SkillResult(installed, skipped, dest_root, linked_any)
+    return SkillResult(installed, skipped, dest_root, linked_any, kind="skills")
 
 
-def uninstall(*, target: Path | None = None) -> SkillResult:
-    dest_root = target or claude_skills_dir()
+def _install_instructions(path: Path, *, force: bool) -> SkillResult:
+    """Single-file style: a short block appended to what is already there.
+
+    Additive and marker-delimited. These files are the user's own standing
+    instructions to their agent, so nothing in them is removed or reordered —
+    and re-running replaces our block rather than adding a second.
+    """
+    source = bundled_skills_dir()
+    block = instructions_block(source or Path("(bundled)"), short_executable())
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text() if path.exists() else ""
+
+    if BLOCK_RE.search(existing):
+        body = BLOCK_RE.sub("\n", existing).rstrip()
+        action = "updated"
+    else:
+        body = existing.rstrip()
+        action = "appended" if body else "created"
+
+    if body and path.exists():
+        # Their instructions to their own agent; keep a copy before touching it.
+        backup = path.with_name(f"{path.name}.collab-backup-{time.strftime('%Y%m%d-%H%M%S')}")
+        shutil.copy2(path, backup)
+
+    path.write_text((body + "\n\n" if body else "") + block + "\n")
+    return SkillResult([action], [], path, False, kind="file")
+
+
+def install(*, target: Path | None = None, copy: bool = False,
+            force: bool = False, agent: str | None = None) -> list[SkillResult]:
+    """Install into every detected agent, or just the one named.
+
+    ``target`` overrides the destination for the Claude-style install, which is
+    what the tests use.
+    """
+    if target is not None:
+        result = _install_skills_dir(target, copy=copy, force=force)
+        result.label = "Claude Code"
+        return [result]
+
+    chosen = [t for t in known_targets() if t.key == agent] if agent else detect_targets()
+    if agent and not chosen:
+        raise RuntimeError(f"unknown agent {agent!r} — "
+                           f"try one of: {', '.join(t.key for t in known_targets())}")
+
+    results: list[SkillResult] = []
+    for t in chosen:
+        try:
+            if t.kind == "skills":
+                result = _install_skills_dir(t.path, copy=copy, force=force)
+            else:
+                result = _install_instructions(t.path, force=force)
+        except (OSError, RuntimeError) as exc:
+            result = SkillResult([], [], t.path, False, kind=t.kind,
+                                 note=str(exc))
+        result.label = t.label
+        results.append(result)
+    return results
+
+
+def uninstall(*, target: Path | None = None,
+              agent: str | None = None) -> list[SkillResult]:
+    """Remove only what we installed, from every detected agent."""
+    if target is not None:
+        return [_uninstall_skills_dir(target)]
+
+    chosen = [t for t in known_targets() if t.key == agent] if agent else detect_targets()
+    results: list[SkillResult] = []
+    for t in chosen:
+        if t.kind == "skills":
+            result = _uninstall_skills_dir(t.path)
+        else:
+            result = _uninstall_instructions(t.path)
+        result.label = t.label
+        results.append(result)
+    return results
+
+
+def _uninstall_skills_dir(dest_root: Path) -> SkillResult:
     removed, skipped = [], []
     source = bundled_skills_dir()
 
@@ -104,19 +295,56 @@ def uninstall(*, target: Path | None = None) -> SkillResult:
             shutil.rmtree(dest)
         removed.append(name)
 
-    return SkillResult(removed, skipped, dest_root, False)
+    return SkillResult(removed, skipped, dest_root, False, kind="skills")
+
+
+def _uninstall_instructions(path: Path) -> SkillResult:
+    if not path.exists():
+        return SkillResult([], [], path, False, kind="file")
+    body = path.read_text()
+    if not BLOCK_RE.search(body):
+        return SkillResult([], [], path, False, kind="file")
+
+    cleaned = BLOCK_RE.sub("\n", body).rstrip()
+    if cleaned:
+        path.write_text(cleaned + "\n")
+    else:
+        # The file held nothing but our block; do not leave an empty one.
+        path.unlink()
+    return SkillResult(["removed"], [], path, False, kind="file")
 
 
 def status(*, target: Path | None = None) -> dict[str, object]:
-    dest_root = target or claude_skills_dir()
-    out: dict[str, object] = {"target": str(dest_root), "skills": {}}
-    for name in SKILL_NAMES:
-        dest = dest_root / name
-        if dest.is_symlink():
-            state = f"linked -> {os.readlink(dest)}"
-        elif dest.is_dir():
-            state = "copied"
+    """Where collab's guidance is installed, and where it could be."""
+    if target is not None:
+        return {"target": str(target),
+                "skills": {name: _skill_state(target / name)
+                           for name in SKILL_NAMES}}
+
+    detected = {t.key for t in detect_targets()}
+    agents: dict[str, object] = {}
+    for t in known_targets():
+        entry: dict[str, object] = {
+            "label": t.label,
+            "kind": t.kind,
+            "path": str(t.path),
+            "present": t.key in detected,
+        }
+        if t.kind == "skills":
+            entry["skills"] = {name: _skill_state(t.path / name)
+                               for name in SKILL_NAMES}
+            entry["installed"] = all(v != "not installed"
+                                     for v in entry["skills"].values())
         else:
-            state = "not installed"
-        out["skills"][name] = state  # type: ignore[index]
-    return out
+            entry["installed"] = (t.path.exists()
+                                  and bool(BLOCK_RE.search(t.path.read_text())))
+        agents[t.key] = entry
+    return {"detected": sorted(detected), "agents": agents}
+
+
+def _skill_state(dest: Path) -> str:
+    if dest.is_symlink():
+        return f"linked -> {os.readlink(dest)}"
+    if dest.is_dir():
+        return "copied"
+    return "not installed"

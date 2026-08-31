@@ -240,6 +240,22 @@ Each event is one line:
 
 ## Commands
 
+Running `collab` with no arguments prints this grouped overview, so you never
+have to remember which command does what:
+
+```
+$ collab
+collab 1.7.0 — let coding agents talk to each other
+
+  in session s_bb9c59a3 as alice (host) · live
+
+  Start or join a session
+    host                         start a session and print a link to share
+    join <url>#<invite>          join someone else's session
+    ...
+```
+
+
 | Command | What it does |
 |---|---|
 | `collab host` | start a session, open a tunnel, print the join line, come up listening |
@@ -267,10 +283,46 @@ Each event is one line:
 | `collab name <n>` | change your display name, live |
 | `collab statusline install` | add the status bar segment |
 
-## Agent skills
+## Teaching your agents about collab
 
-`install.sh` installs three skills into your agent so it knows collab exists and
-how to drive it:
+`install.sh` installs collab's guidance into **every coding agent it finds on
+your machine** — not just the one you happen to be using:
+
+```bash
+collab skills install          # every agent detected here
+collab skills status           # where it is installed, and where it could be
+collab skills status --all     # including agents you do not have
+collab skills install --agent codex
+collab skills uninstall        # removes only collab's own additions
+```
+
+```
+$ collab skills install
+[ok]   Claude Code: linked 4 skills
+       ~/.claude/skills
+[ok]   Codex CLI: created its instructions
+       ~/.codex/AGENTS.md
+[ok]   Gemini CLI: created its instructions
+       ~/.gemini/GEMINI.md
+```
+
+Agents take instructions in two shapes, and collab respects the difference:
+
+| Shape | Agents | What it installs |
+|---|---|---|
+| **Skill directories**, loaded when relevant | Claude Code | the full skills, symlinked |
+| **One instructions file**, read on every prompt | Codex, Gemini CLI, opencode, Cursor, Windsurf, Amp, Crush, Goose | a short block: what collab is, the commands, and where the full skills live |
+
+That second row matters. Those files are read on *every* prompt, so pasting
+four full skills into one would spend your context budget on collab whether or
+not you are using it. They get roughly thirty lines instead, pointing at the
+rest.
+
+Every write is additive and marker-delimited: your own instructions are never
+removed or reordered, the file is backed up first, and re-running replaces
+collab's block rather than adding a second.
+
+### The skills themselves
 
 | Skill | Fires when |
 |---|---|
@@ -560,11 +612,26 @@ how many others are connected**:
 It prints nothing at all when there is no session.
 
 ```bash
-collab statusline install                    # auto-detects the host
-collab statusline install --agent tmux
+collab statusline install                    # every host detected here
+collab statusline install --agent tmux       # just one
 collab statusline install --agent generic    # wiring notes for anything else
 collab statusline uninstall
 ```
+
+It installs into **every** status line host it finds — someone running Claude
+Code inside tmux wants the segment in both — and names the agents it had to
+skip, with the reason:
+
+```
+$ collab statusline install
+[ok]   Claude Code settings.json statusLine: updated ~/.claude/statusline-command.sh
+[ok]   tmux status-right: updated ~/.tmux.conf
+       Codex CLI: no status line — has no status line or plugin hook
+       Gemini CLI: no status line — statusline is still a feature request
+```
+
+Saying so is the point: without it you cannot tell whether collab skipped Codex
+deliberately or simply missed it.
 
 **It works with any agent, not just Claude Code.** The universal primitive is
 one command that prints a line and exits 0:

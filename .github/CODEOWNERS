@@ -1,0 +1,4 @@
+# Every path in this repository, so nothing merges without a review from the
+# owner. GitHub applies the last matching rule, so this stays first and alone
+# until some path genuinely needs a different reviewer.
+*   @rperez93

@@ -20,14 +20,21 @@ cd collab-a2a
 If it stops saying no Python ≥3.10 was found, tell the user which of the
 printed options to install. Do not try to work around it.
 
-This also installs collab's agent skills for you. Verify both:
+This also installs collab's guidance into **every coding agent on the machine**
+— Claude Code gets the full skills, agents that read a single instructions file
+(Codex, Gemini CLI, opencode, Cursor and others) get a short block pointing at
+them. Verify both:
 
 ```bash
 .venv/bin/collab --version
 .venv/bin/collab skills status
 ```
 
-If any skill shows `not installed`, run `.venv/bin/collab skills install`.
+If any agent shows `not installed`, run `.venv/bin/collab skills install`.
+`--all` also lists agents that are not on this machine.
+
+Lost? `.venv/bin/collab` on its own prints every command, grouped by what you
+are trying to do.
 
 ## 2. Settings (optional)
 
