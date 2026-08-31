@@ -117,6 +117,29 @@ it yourself rather than reporting the session lost or asking the other person
 to restart it. Only when nothing at all is listed is nothing actually running,
 and then say so plainly: they host and send a link, or you host and send one.
 
+## Never host as a fallback
+
+If you cannot connect — bad link, hub unreachable, nothing discovered, session
+stopped — **stop and report it. Do not run `collab host`.**
+
+Hosting always succeeds, which is exactly the trap: it does not connect you to
+anyone. It opens a *different* session with nobody in it, and both sides then
+report success while sitting in separate rooms. The other agent keeps waiting
+in the session you failed to reach.
+
+What to do instead, depending on what you saw:
+
+| What happened | Say this |
+|---|---|
+| The link was refused or unreachable | the link may be stale — the invite rotates when a session is resumed; ask for the current one |
+| `discover` found nothing | nothing is hosting on this machine; ask whether to start one |
+| The session is listed as *stopped, but kept in this repo* | it is intact, with its history; ask whether to resume it with `collab host` |
+| A `guest` row is all there is | that agent has no invite to give; ask its host for a link |
+
+Resuming a stopped session in **this** repo is the one case where `collab host`
+is the right command — and it is still the user's call, not an automatic retry.
+Say what is there, including how much history, and ask.
+
 ## 2. Read the snapshot you just got
 
 The output tells you who is present, their repo, branch and focus, the open

@@ -10,15 +10,75 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+from pathlib import Path
 
 import uvicorn
 
+from . import peers
 from .server.app import create_app
 from .server.session import HubConfig
 from .server.store import Store
 from .server.tunnel import TunnelSupervisor
 
 logger = logging.getLogger(__name__)
+
+#: Well inside :data:`collab.peers.STALE_AFTER`, so a missed beat or two costs
+#: nothing. The hub is the authority on whether the session can be joined, so
+#: it must not depend on the listener to stay visible.
+REGISTRY_REFRESH = 30.0
+
+
+class RegistryHeartbeat:
+    """Keeps this hub's peer record fresh for as long as it is serving.
+
+    The record carries the live invite, so it is also how another agent on this
+    machine joins without a link. It is refreshed rather than written once
+    because a record that stops being refreshed is treated as a dead process
+    and pruned — which is right, and is why the living have to keep saying so.
+    """
+
+    def __init__(self, cfg: HubConfig, interval: float = REGISTRY_REFRESH):
+        self.cfg = cfg
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def beat(self) -> None:
+        # Re-read: the invite changes on resume, and the public URL changes
+        # whenever the tunnel comes back on a new address.
+        latest = HubConfig.load(self.cfg.session_id, self.cfg.home) or self.cfg
+        try:
+            peers.announce(
+                session_id=latest.session_id, name=latest.host_name, role="host",
+                url=latest.public_url or latest.local_url,
+                repo=str(Path(latest.home).parent), home=latest.home,
+                invite=latest.invite, host_name=latest.host_name,
+                pid=os.getpid(),
+            )
+        except OSError as exc:
+            logger.warning("could not refresh the peer record: %s", exc)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self.beat()
+            self._stop.wait(self.interval)
+
+    def start(self) -> None:
+        self.beat()
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="collab-registry")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        # Stop advertising a hub that is no longer listening.
+        try:
+            peers.withdraw(self.cfg.session_id, os.getpid())
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -78,9 +138,12 @@ def main() -> int:
         supervisor=supervisor,
         on_url_change=remember_url,
     )
+    registry = RegistryHeartbeat(cfg)
+    registry.start()
     try:
         uvicorn.run(app, host=cfg.bind, port=cfg.port, log_level="warning", access_log=False)
     finally:
+        registry.stop()
         if supervisor is not None:
             supervisor.stop()
         store.close()

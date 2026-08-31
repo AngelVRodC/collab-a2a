@@ -189,6 +189,18 @@ def load(path: Path) -> Peer | None:
         return None
 
 
+def _older_than(path: Path, seconds: float) -> bool:
+    """Is this file old enough that nobody is still writing it?
+
+    A record being written right now is briefly unreadable; deleting it because
+    of that would be a race we created ourselves.
+    """
+    try:
+        return (time.time() - path.stat().st_mtime) > seconds
+    except OSError:
+        return False
+
+
 def discover(*, include_stale: bool = False, prune: bool = True) -> list[Peer]:
     """Every collab session running on this machine for this user.
 
@@ -204,6 +216,14 @@ def discover(*, include_stale: bool = False, prune: bool = True) -> list[Peer]:
     for child in sorted(d.glob("*.json")):
         peer = load(child)
         if peer is None:
+            # Truncated by a crash mid-write, or written by a version whose
+            # shape we no longer understand. Nothing will ever read it again,
+            # and left alone it accumulates for the life of the machine.
+            if prune and _older_than(child, STALE_AFTER):
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
             continue
         if not (peer.alive or include_stale):
             if prune:

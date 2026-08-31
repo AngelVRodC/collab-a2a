@@ -298,6 +298,23 @@ def cmd_host(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hosting_is_not_the_fallback(resumable: bool = False) -> None:
+    """Say why hosting does not fix a failed join.
+
+    An agent that cannot connect will reach for the next command that looks
+    like progress, and `collab host` succeeds every time — which is the trap.
+    Hosting does not join you to anyone: it opens a *different* session with
+    nobody in it, and both sides then report success while sitting in separate
+    rooms. Whether to host instead is the user's call, not a retry.
+    """
+    if resumable:
+        print(dim("  hosting it again is the user's call — ask them first."))
+    else:
+        print(dim("  do not host as a fallback: that starts a *different*"
+                  " session with nobody in it."))
+        print(dim("  report what you found and let the user decide."))
+
+
 def _stopped_here(session_id: str = "") -> list[tuple[Any, dict[str, int]]]:
     """Sessions this repo has on disk that are not currently running.
 
@@ -365,14 +382,17 @@ def cmd_join(args: argparse.Namespace) -> int:
                 _describe_stopped(stopped)
                 print(dim(f"\n  `collab host` in {where} brings it back"
                           " — the data is kept"))
+                _hosting_is_not_the_fallback(resumable=True)
             else:
                 print(dim("  `collab discover` lists what is running here"))
+                _hosting_is_not_the_fallback()
             return 1
         if not peer.joinable:
             fail(f"{peer.session_id} is running here but is not the host, "
                  "so it has no invite to hand out")
             print(dim(f"  ask {peer.host_name or 'the host'} for a link, "
                       "or run `collab discover`"))
+            _hosting_is_not_the_fallback()
             return 1
         url = peer.join_url()
         ok(f"found {c(peer.session_id, '36')} hosted by {peer.name} "
@@ -388,11 +408,14 @@ def cmd_join(args: argparse.Namespace) -> int:
         # A local peer we could not reach is a session that went down between
         # being advertised and being joined. Say that, rather than leaving a
         # connection error as the whole explanation.
+        resumable = False
         if args.local or not args.url:
             if (stopped := _stopped_here()):
+                resumable = True
                 print(dim("  that session is down, but this repo still has it:"))
                 _describe_stopped(stopped)
                 print(dim("\n  `collab host` brings it back — the data is kept"))
+        _hosting_is_not_the_fallback(resumable=resumable)
         return 1
 
     if orphans := stop_orphans(profile.home, keep=profile.session_id):

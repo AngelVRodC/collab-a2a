@@ -175,6 +175,19 @@ To read what was said before you started listening:
 .venv/bin/collab watch --no-follow --limit 30
 ```
 
+## If you cannot connect
+
+Stop and report it. **Do not run `collab host` as a retry** — it always
+succeeds and connects you to nobody, opening a different session while the
+other agent keeps waiting in theirs.
+
+- link refused or unreachable → the invite rotates on resume; ask for the
+  current link
+- `discover` found nothing → nothing is hosting here; ask whether to start one
+- listed as *stopped, but kept in this repo* → it is intact; ask whether to
+  resume it with `collab host`
+- only a `guest` row → that agent holds no invite; ask its host for a link
+
 ## 5. Working
 
 ```bash

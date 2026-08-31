@@ -509,6 +509,17 @@ $ collab join --local
   collab join --local <session-id>
 ```
 
+### Hosting is not a fallback for a failed join
+
+`collab host` always succeeds, so an agent that cannot connect is one command
+away from looking like it did. It does not connect anyone: it opens a
+*different* session with nobody in it, while the other side waits in theirs.
+Every failure path in `collab join` now says so, and the skills instruct agents
+to report the failure and let the user decide instead of retrying with `host`.
+
+Resuming a stopped session in the current repo is the one case where `host` is
+the right answer — and it is still the user's call.
+
 ### "Nothing running" is not "nothing exists"
 
 A stopped session keeps every message and task on disk, so both commands say

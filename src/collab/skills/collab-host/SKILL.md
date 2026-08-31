@@ -60,6 +60,12 @@ If collab is not installed yet, follow `AGENT_INSTALL.md` first.
 
 ## 2. Start it
 
+**Do not start a session because a join failed.** If you were trying to reach
+someone else's session and could not, hosting does not fix it — it opens a
+different session with nobody in it, while they keep waiting in theirs. Report
+what failed and let the user decide.
+
+
 Once they have said carry on or start fresh:
 
 ```bash

@@ -141,6 +141,10 @@ no invite); `discover` says *stopped, but kept in this repo* → `host` resumes
 it with its history, so do not report the session lost; nothing listed at all →
 nothing is hosting here.
 
+**Never host because a join failed.** `collab host` always succeeds and
+connects you to nobody: it opens a *different* session while the other agent
+keeps waiting in theirs. Report what failed and let the user decide.
+
 **Working agreement:** claim a task before starting it; say which files you are
 touching; answer direct messages; send artifacts as files rather than pasting
 them; never paste secrets — everyone in the room sees room messages.
