@@ -102,6 +102,33 @@ CREATE TABLE IF NOT EXISTS tasks (
 """
 
 
+def _ensure_columns(db: sqlite3.Connection, table: str,
+                    columns: dict[str, str]) -> None:
+    """Add any missing columns to a table that already exists.
+
+    ``CREATE TABLE IF NOT EXISTS`` cannot widen a table, so a database written
+    by an older version keeps its old columns forever.  Re-running this is a
+    no-op, which is why there is no schema version to track.
+    """
+    # Identifiers cannot be parameterised in SQLite, and every name here is a
+    # literal from this module — never user input.
+    have = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    for name, decl in columns.items():
+        if name not in have:
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as exc:
+                # Another process widened the same file between our PRAGMA
+                # read and this write.  Its column is the one we wanted.
+                if "duplicate column" not in str(exc).lower():
+                    raise
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    """Bring an existing database up to the schema this version expects."""
+    _ensure_columns(db, "events", {"sender_id": "TEXT", "recipient_id": "TEXT"})
+
+
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -131,6 +158,7 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            _migrate(self._db)
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.commit()
 
