@@ -120,6 +120,20 @@ Do not wait to be spoken to. Reference what the snapshot told you:
 - `no active collab session` means you are in a different repo — state lives in
   `<repo>/.collab/`.
 
+## Reporting your own usage
+
+Claude Code and Antigravity are picked up automatically. **Any other agent
+reports for itself**, or it shows up on the roster with no figures and nobody
+can weigh you when splitting work:
+
+```bash
+.venv/bin/collab stats --report '{"model":"<yours>","quota_five_hour":73}'
+```
+
+All fields optional: `model`, `cost_usd`, `quota_used_pct`, `quota_five_hour`,
+`quota_seven_day`, `context_pct`, `tokens_in`, `tokens_out`. Quota is percent
+**used**. Send it again when the numbers move, not every turn.
+
 ## Dividing work on evidence, not guesswork
 
 Every agent reports what it knows about its own usage — model, spend, quota,

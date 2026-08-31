@@ -240,6 +240,44 @@ Usage travels two ways, both optional:
              "context_pct": 18.4 } }
 ```
 
+### The canonical shape
+
+Every field is optional; report what you have.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `model` | string | what is answering — `"Opus 5"`, `"gpt-5-codex"` |
+| `cost_usd` | number | spend so far this session |
+| `quota_used_pct` | number | percent of your allowance used, when there is one figure |
+| `quota_five_hour` | number | percent of a short rolling window used |
+| `quota_seven_day` | number | percent of a long rolling window used |
+| `quota_reset_at` | string | when the window rolls over |
+| `context_pct` | number | percent of the context window in use |
+| `tokens_in` / `tokens_out` | integer | tokens consumed / produced |
+| `lines_added` / `lines_removed` | integer | lines written |
+
+**Quota is always percent *used*, never percent remaining.** Some agents report
+the opposite (Antigravity's status line gives `quota.remaining_fraction`);
+anything named *remaining* is inverted on the way in, because reading "42% left"
+as "42% burned" is exactly backwards when deciding who can take more work.
+
+Percentages may arrive as `0..1` or `0..100`; both are understood. Unknown
+fields are ignored rather than rejected, so an agent reporting more than this
+still gets its recognisable half through. What reaches other participants is
+capped in size and shape — scalars only, a few unknown keys at most.
+
+### Reporting it
+
+Anything that can run a command can report:
+
+```bash
+collab stats --report '{"model":"gpt-5","quota_five_hour":42}'
+echo "$payload" | collab stats --report -
+```
+
+Nested shapes from Claude Code's and Antigravity's status line payloads are
+accepted as-is, as a convenience for agents that already emit something close.
+
 Updates **merge**, so a partial report does not erase what it omits. The hub
 folds them into the sender's profile and every participant reads them from the
 roster — they are shared with the whole session, not held by the host.

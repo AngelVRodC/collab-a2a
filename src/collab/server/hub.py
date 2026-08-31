@@ -142,12 +142,16 @@ class Hub:
         self.store.update_meta(participant_id, meta)
 
     def merge_stats(self, participant_id: str, stats: dict[str, Any]) -> None:
+        from ..stats import sanitise
+
         person = self.store.participant_by_id(participant_id)
         if person is None:
             return
         meta = dict(person.meta)
         merged = dict(meta.get("stats") or {})
-        merged.update({k: v for k, v in stats.items() if k != "_identity"})
+        # Usage goes onto every participant's roster, so it is capped in size
+        # and shape on the way in rather than trusted.
+        merged.update(sanitise(stats))
         meta["stats"] = merged
         for key in ("machine", "machine_id", "user"):
             if stats.get(key):

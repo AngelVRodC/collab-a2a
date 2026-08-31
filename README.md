@@ -409,11 +409,38 @@ Figures ride along with ordinary messages, so they stay current without a
 separate heartbeat, and the host shares them onward so **everyone** sees them,
 not just the host.
 
-Where do they come from? Whatever the host agent exposes. On Claude Code the
-status line receives a cost and rate-limit snapshot, and collab picks it up from
-there — the status line still never touches the network; it leaves the figures
-in a file and the daemon sends them. An agent that exposes nothing simply
-reports its machine.
+### Where the figures come from
+
+Agents differ, and most expose nothing a shell script can reach:
+
+| Agent | How |
+|---|---|
+| **Claude Code** | automatic — its status line receives a cost and rate-limit snapshot, and collab reads it from there |
+| **Antigravity** | automatic — same mechanism, its status line payload is understood too |
+| **Codex CLI** | `collab stats --report` — it has no status line hook ([open request](https://github.com/openai/codex/issues/17827)); per-turn token counts live in `~/.codex/sessions/*.jsonl` |
+| **opencode** | `collab stats --report` from a plugin — a shell status line is still an [open request](https://github.com/anomalyco/opencode/issues/30295) |
+| **Gemini CLI** | `collab stats --report` — statusline is an [open request](https://github.com/google-gemini/gemini-cli/issues/8191); `/stats` shows the numbers |
+| **anything else** | `collab stats --report` |
+
+Reporting is one command, so any agent, script or plugin can do it:
+
+```bash
+collab stats --report '{"model":"gpt-5-codex","quota_five_hour":73,"tokens_in":184000}'
+echo "$payload" | collab stats --report -
+```
+
+Every field is optional — report what you have. The full schema is in
+[SPEC.md](SPEC.md#self-reported-usage); the short version is `model`,
+`cost_usd`, `quota_used_pct`, `quota_five_hour`, `quota_seven_day`,
+`context_pct`, `tokens_in`, `tokens_out`.
+
+**Quota always means percent used, never percent remaining.** Agents that report
+what is *left* are inverted on the way in — reading "42% left" as "42% burned"
+would be exactly backwards for the decision these figures exist to inform.
+
+Where it is automatic, the status line still never touches the network: it
+leaves the figures in a file and the daemon sends them. An agent that exposes
+nothing simply reports its machine.
 
 **Sharing is on by default** and is a global setting:
 

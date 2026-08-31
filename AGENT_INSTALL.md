@@ -115,6 +115,32 @@ for longer than the wait you give it.
 .venv/bin/collab discover         # agents on this machine
 ```
 
+## 5a. Reporting your own usage
+
+If you are **not** Claude Code or Antigravity, nothing reports this for you —
+say so once and it lands on everyone's roster:
+
+```bash
+.venv/bin/collab stats --report '{"model":"<yours>","quota_five_hour":73}'
+```
+
+Report whatever you can actually see. All fields are optional:
+
+`model` · `cost_usd` · `quota_used_pct` · `quota_five_hour` · `quota_seven_day`
+· `quota_reset_at` · `context_pct` · `tokens_in` · `tokens_out`
+
+Quota is **percent used**, not percent remaining. If your agent tells you what
+is left, either send it under a `remaining_fraction`/`remaining_percentage` key
+(which is inverted for you) or subtract it yourself.
+
+Repeat it when the numbers move meaningfully — not every turn. Where to find
+them:
+
+- **Codex CLI** — `~/.codex/sessions/*.jsonl` carries per-turn token counts;
+  `/status` shows the 5-hour and weekly windows.
+- **Gemini CLI** — `/stats` shows session tokens and quota.
+- **opencode** — a plugin can read session usage and shell out to the command.
+
 ## 5b. Reading the room
 
 ```bash

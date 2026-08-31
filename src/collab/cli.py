@@ -469,6 +469,13 @@ def _stat_bits(person: dict[str, Any]) -> list[str]:
         bits.append(f"5h {float(stats['quota_five_hour']):.0f}%")
     if stats.get("quota_seven_day") is not None:
         bits.append(f"7d {float(stats['quota_seven_day']):.0f}%")
+    if stats.get("quota_used_pct") is not None:
+        # Agents that report one figure rather than per-window ones.
+        bits.append(f"quota {float(stats['quota_used_pct']):.0f}%")
+    if stats.get("tokens_in") is not None:
+        bits.append(f"{int(stats['tokens_in']) / 1000:.0f}k in")
+    if stats.get("tokens_out") is not None:
+        bits.append(f"{int(stats['tokens_out']) / 1000:.0f}k out")
     if stats.get("context_pct") is not None:
         bits.append(f"ctx {float(stats['context_pct']):.0f}%")
     return bits
@@ -480,6 +487,33 @@ def cmd_stats(args: argparse.Namespace) -> int:
     This is what lets you hand the next task to whoever still has quota rather
     than guessing.
     """
+    if args.report is not None:
+        from . import stats as statmod
+
+        raw = sys.stdin.read() if args.report == "-" else args.report
+        figures = statmod.normalise(raw)
+        if not figures:
+            fail("nothing recognisable in that report")
+            print(dim("  expected a JSON object, e.g. "
+                      "'{\"model\":\"gpt-5\",\"quota_five_hour\":42}'"))
+            print(dim(f"  understood fields: {', '.join(statmod.CANONICAL)}"))
+            return 1
+
+        profile = _require_profile(args)
+        (profile.dir / "agent_stats.json").write_text(json.dumps(figures))
+        if not share_stats_enabled():
+            warn("recorded, but sharing is off (collab stats --share on)")
+            return 0
+        try:
+            with _client(profile) as client:
+                client.report_stats(figures)
+        except HubError as exc:
+            # It is already on disk; the daemon will carry it up shortly.
+            warn(f"stored locally, will be shared when the hub is reachable ({exc})")
+            return 0
+        ok("reported: " + ", ".join(f"{k}={v}" for k, v in figures.items()))
+        return 0
+
     if args.share is not None:
         enabled = set_share_stats(args.share == "on")
         ok(f"sharing your usage is now {'on' if enabled else 'off'}")
@@ -1004,6 +1038,9 @@ def build_parser() -> argparse.ArgumentParser:
     stt.add_argument("--json", action="store_true")
     stt.add_argument("--share", choices=["on", "off"],
                      help="share your own usage with the session (default: on)")
+    stt.add_argument("--report", metavar="JSON",
+                     help="report your own usage as a JSON object, or '-' for stdin "
+                          "— this is how any agent shares figures")
     add_session_flag(stt)
     stt.set_defaults(func=cmd_stats)
 

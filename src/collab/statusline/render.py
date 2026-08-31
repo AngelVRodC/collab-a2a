@@ -68,42 +68,24 @@ def stash_agent_stats(raw: str, cwd: Path | None) -> None:
 
     The status line must never touch the network, and the daemon must never
     guess at the agent's internals — so the two meet through a file.
+
+    Only Claude Code and Antigravity hand a status line this payload today.
+    Any other agent reports with `collab stats --report`, which lands in the
+    same place through the same normaliser.
     """
     if not raw.strip():
         return
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return
+    from ..stats import normalise
 
-    stats: dict[str, Any] = {}
-    if isinstance(data.get("model"), dict):
-        stats["model"] = data["model"].get("display_name")
-    if isinstance(data.get("cost"), dict):
-        cost = data["cost"]
-        if cost.get("total_cost_usd") is not None:
-            stats["cost_usd"] = round(float(cost["total_cost_usd"]), 4)
-        if cost.get("total_lines_added") is not None:
-            stats["lines_added"] = cost.get("total_lines_added")
-            stats["lines_removed"] = cost.get("total_lines_removed")
-    if isinstance(data.get("rate_limits"), dict):
-        limits = data["rate_limits"]
-        for key in ("five_hour", "seven_day"):
-            window = limits.get(key)
-            if isinstance(window, dict) and window.get("used_percentage") is not None:
-                stats[f"quota_{key}"] = round(float(window["used_percentage"]), 1)
-    if isinstance(data.get("context_window"), dict):
-        used = data["context_window"].get("used_percentage")
-        if used is not None:
-            stats["context_pct"] = round(float(used), 1)
-    if not stats:
+    figures = normalise(raw)
+    if not figures:
         return
 
     try:
         profile = SessionProfile.current(cwd)
         if profile is None:
             return
-        (profile.dir / "agent_stats.json").write_text(json.dumps(stats))
+        (profile.dir / "agent_stats.json").write_text(json.dumps(figures))
     except (OSError, ValueError):
         pass
 

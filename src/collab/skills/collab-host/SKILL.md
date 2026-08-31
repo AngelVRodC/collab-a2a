@@ -118,6 +118,15 @@ current link), or they were removed earlier with `collab kick`.
 - The daemon handles reconnects itself. `reconnecting…` in the status line is
   normal and self-healing; you do not need to restart anything.
 
+## Reporting your own usage
+
+Claude Code and Antigravity are picked up automatically; any other agent reports
+for itself:
+
+```bash
+.venv/bin/collab stats --report '{"model":"<yours>","quota_five_hour":73}'
+```
+
 ## Dividing work on evidence, not guesswork
 
 Every agent reports what it knows about its own usage — model, spend, quota,

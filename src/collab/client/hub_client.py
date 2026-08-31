@@ -144,6 +144,12 @@ class HubClient:
             raise HubError(f"hub rejected the message: {result['error'].get('message')}")
         return result.get("result", {})
 
+    def report_stats(self, figures: dict[str, Any],
+                     identity: dict[str, str] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"stats": figures}
+        payload.update(identity or {})
+        return self._request("POST", f"{EXT_PREFIX}/stats", json=payload)
+
     # --- files ------------------------------------------------------------
 
     def upload_file(self, path: Path, *, to: str | None = None,

@@ -1,0 +1,126 @@
+"""Reading usage from whatever agent the other person happens to run.
+
+Most agents expose nothing a shell script can reach, so the canonical shape and
+`collab stats --report` are the contract. These check the translations, and in
+particular that "how much is left" never gets read as "how much is used".
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from collab.stats import CANONICAL, normalise, sanitise
+
+
+def test_the_flat_canonical_shape_passes_through():
+    """The whole integration for any agent: emit these keys."""
+    assert normalise({"model": "gpt-5", "quota_five_hour": 42,
+                      "cost_usd": 1.5}) == {
+        "model": "gpt-5", "quota_five_hour": 42.0, "cost_usd": 1.5}
+
+
+def test_claude_code_status_line_payload():
+    got = normalise({
+        "model": {"display_name": "Opus 5"},
+        "cost": {"total_cost_usd": 1.24, "total_lines_added": 310,
+                 "total_lines_removed": 44},
+        "rate_limits": {"five_hour": {"used_percentage": 42.3},
+                        "seven_day": {"used_percentage": 11.8}},
+        "context_window": {"used_percentage": 18.4},
+    })
+    assert got["model"] == "Opus 5"
+    assert got["cost_usd"] == 1.24
+    assert got["quota_five_hour"] == 42.3
+    assert got["quota_seven_day"] == 11.8
+    assert got["context_pct"] == 18.4
+    assert got["lines_added"] == 310
+
+
+def test_remaining_quota_is_inverted_not_copied():
+    """Antigravity reports what is *left*.
+
+    Copying it across would say an agent with 58% of its allowance still free
+    has burned 58% — the exact opposite, and the figure people use to decide
+    who can take on more work.
+    """
+    got = normalise({"quota": {"remaining_fraction": 0.58}})
+    assert got["quota_used_pct"] == 42.0
+
+    assert normalise({"quota": {"remaining_percentage": 90}})["quota_used_pct"] == 10.0
+    assert normalise({"quota": {"remaining_fraction": 1.0}})["quota_used_pct"] == 0.0
+    assert normalise({"quota": {"remaining_fraction": 0.0}})["quota_used_pct"] == 100.0
+
+
+def test_a_windowed_remaining_figure_is_inverted_too():
+    got = normalise({"rate_limits": {"five_hour": {"remaining_percentage": 75}}})
+    assert got["quota_five_hour"] == 25.0
+
+
+def test_token_counts_from_a_loose_usage_wrapper():
+    """What a Codex- or opencode-style reporter would send."""
+    got = normalise({"usage": {"input_tokens": 184000, "output_tokens": 22400,
+                               "model_name": "gpt-5-codex"}})
+    assert got == {"tokens_in": 184000, "tokens_out": 22400, "model": "gpt-5-codex"}
+
+
+def test_antigravity_token_field_names():
+    got = normalise({"context_window": {"total_input_tokens": 1200,
+                                        "total_output_tokens": 300,
+                                        "used_percentage": 22}})
+    assert got["tokens_in"] == 1200 and got["tokens_out"] == 300
+    assert got["context_pct"] == 22.0
+
+
+@pytest.mark.parametrize("given,expected", [
+    ({"context_pct": 0.35}, 35.0),   # a fraction
+    ({"context_pct": 35}, 35.0),     # already a percentage
+    ({"context_pct": 100}, 100.0),
+])
+def test_fractions_and_percentages_both_work(given, expected):
+    assert normalise(given)["context_pct"] == expected
+
+
+def test_a_json_string_is_accepted():
+    assert normalise('{"model": "gpt-5"}') == {"model": "gpt-5"}
+
+
+@pytest.mark.parametrize("junk", ["", "not json", "[]", "null", '{"nothing": "here"}'])
+def test_nothing_recognisable_yields_nothing(junk):
+    assert normalise(junk) == {}
+
+
+def test_unknown_fields_do_not_block_the_rest():
+    """A newer agent reporting more than we know still gets its half through."""
+    got = normalise({"model": "gpt-6", "some_future_metric": 12})
+    assert got == {"model": "gpt-6"}
+
+
+# --- what reaches everyone else's roster -------------------------------------
+
+def test_sanitise_keeps_canonical_fields():
+    assert sanitise({"model": "Opus 5", "quota_five_hour": 42})["quota_five_hour"] == 42.0
+
+
+def test_sanitise_drops_nested_values():
+    """Usage lands on every roster; it stays flat and small."""
+    assert "payload" not in sanitise({"payload": {"deep": [1, 2, 3]}})
+    assert "listy" not in sanitise({"listy": [1, 2, 3]})
+
+
+def test_sanitise_caps_unknown_fields():
+    noisy = {f"extra_{i}": i for i in range(50)}
+    assert len(sanitise(noisy)) <= 6
+
+
+def test_sanitise_truncates_long_strings():
+    assert len(sanitise({"model": "x" * 5000})["model"]) <= 64
+
+
+def test_every_canonical_field_survives_a_round_trip():
+    sample = {"model": "m", "cost_usd": 1.0, "quota_used_pct": 5.0,
+              "quota_five_hour": 6.0, "quota_seven_day": 7.0,
+              "quota_reset_at": "2026-09-01T00:00Z", "context_pct": 8.0,
+              "tokens_in": 9, "tokens_out": 10, "lines_added": 11,
+              "lines_removed": 12}
+    assert set(sample) == set(CANONICAL), "a new field needs a test"
+    assert sanitise(normalise(sample)) == sample

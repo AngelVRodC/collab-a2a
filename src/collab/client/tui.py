@@ -78,12 +78,21 @@ def _fmt_pct(value: Any, label: str) -> str:
 
 
 def quota_text(stats: dict[str, Any]) -> str:
-    """The headroom figures, which are what you weigh when splitting work."""
+    """The headroom figures, which are what you weigh when splitting work.
+
+    Some agents report per-window figures, others a single one; show whichever
+    the agent actually has.
+    """
     parts = []
     if (q := _fmt_pct(stats.get("quota_five_hour"), "5h")):
         parts.append(q)
     if (q := _fmt_pct(stats.get("quota_seven_day"), "7d")):
         parts.append(q)
+    if not parts and stats.get("quota_used_pct") is not None:
+        try:
+            return f"quota {float(stats['quota_used_pct']):.0f}%"
+        except (TypeError, ValueError):
+            return ""
     return "quota " + " ".join(parts) if parts else ""
 
 
@@ -103,6 +112,11 @@ def stat_line(person: dict[str, Any]) -> str:
         bits.append(quota)
     if (money := _fmt_money(stats.get("cost_usd"))):
         bits.append(money)
+    if stats.get("tokens_in") is not None:
+        try:
+            bits.append(f"{int(stats['tokens_in']) / 1000:.0f}k in")
+        except (TypeError, ValueError):
+            pass
     if (ctx := _fmt_pct(stats.get("context_pct"), "ctx")):
         bits.append(ctx)
     return " · ".join(bits)
