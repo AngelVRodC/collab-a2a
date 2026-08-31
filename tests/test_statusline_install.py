@@ -162,7 +162,8 @@ def test_appended_block_emits_no_trailing_separator(claude_home):
         json.dumps({"statusLine": {"type": "command", "command": str(script)}}))
     sli.install_claude_code(executable="/opt/collab")
     block = script.read_text().split(sli.BEGIN)[1].split(sli.END)[0]
-    assert "printf ' · '" not in block
+    assert "·" not in block
+    assert "printf '%s '" in block, "still padded, so the next segment is readable"
 
 
 def test_converted_inline_command_keeps_a_separator(claude_home):
@@ -171,4 +172,13 @@ def test_converted_inline_command_keeps_a_separator(claude_home):
         json.dumps({"statusLine": {"type": "command", "command": "echo hi"}}))
     result = sli.install_claude_code(executable="/opt/collab")
     block = result.script.read_text().split(sli.BEGIN)[1].split(sli.END)[0]
-    assert "printf ' · '" in block
+    assert "printf '%s · '" in block
+
+
+def test_block_always_ends_with_padding(claude_home):
+    """Whatever renders next must not butt straight up against our segment."""
+    sli.install_claude_code(executable="/opt/collab")
+    script = Path(_settings(claude_home)["statusLine"]["command"])
+    block = script.read_text().split(sli.BEGIN)[1].split(sli.END)[0]
+    printf = [ln for ln in block.splitlines() if "__collab_seg" in ln and "printf" in ln][-1]
+    assert printf.strip().startswith("printf '%s ")

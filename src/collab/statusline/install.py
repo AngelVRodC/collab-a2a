@@ -68,14 +68,17 @@ def build_block(executable: str, *, separator: bool) -> str:
     the captured ``$input`` in, which is how the segment finds the per-repo
     .collab/ for the directory this Claude Code session is actually in.
     """
-    sep = "  printf ' · '\n" if separator else ""
+    # Always end with a space: whatever segment renders next butts straight up
+    # against ours otherwise. When we know exactly what follows (an inline
+    # command we moved into a script ourselves, which prints no separator of
+    # its own) we use a full separator instead.
+    tail = "%s \u00b7 " if separator else "%s "
     return (
         f"{BEGIN}\n"
         f"if [ -x '{executable}' ]; then\n"
         f"  __collab_seg=\"$(printf '%s' \"${{input:-}}\" | '{executable}' statusline render 2>/dev/null)\"\n"
         f"  if [ -n \"$__collab_seg\" ]; then\n"
-        f"    printf '%s' \"$__collab_seg\"\n"
-        f"{sep}"
+        f"    printf '{tail}' \"$__collab_seg\"\n"
         f"  fi\n"
         f"fi\n"
         f"{END}\n"
@@ -341,8 +344,9 @@ def install_tmux(executable: str | None = None) -> InstallResult:
         action = "appended" if body.strip() else "created"
 
     # tmux renders its own attributes, so ask for plain text.
+    # -ag appends, so the padding goes in front of us here rather than after.
     block = _marker_block_for_conf(
-        f"set -ag status-right '#({exe} statusline render --plain)'"
+        f"set -ag status-right ' #({exe} statusline render --plain)'"
     )
     TMUX_CONF.write_text((body.rstrip("\n") + "\n\n" if body.strip() else "") + block)
     return InstallResult(
