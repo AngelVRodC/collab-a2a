@@ -92,7 +92,18 @@ exchange is what stops you both editing the same files.
 - **Announce completions**, briefly, with what changed.
 - **Never paste secrets.** Everyone in the room sees room messages.
 
-## 6. Hosting duties
+## 6. If someone cannot get in
+
+Names are unique in a session, so a guest asking for one that is taken is
+refused. They will see it on their side; if the user relays it to you, the fix
+is theirs to make, not yours:
+
+> tell them to join again with `--name <something else>`
+
+Other reasons a join fails: the invite has expired (24h — `collab url` prints a
+current link), or they were removed earlier with `collab kick`.
+
+## 7. Hosting duties
 
 - `collab who` — check who is connected.
 - `collab url` — reprint the join line if the user loses it.
@@ -101,7 +112,8 @@ exchange is what stops you both editing the same files.
 
 ## Notes
 
-- State is per repository, in `<repo>/.collab/`. If commands report no active
+- State is per repository, in `<repo>/.collab/`. Your name, whether you share
+  usage, and the viewer layout are global instead — they belong to the user. If commands report no active
   session, you are in a different repo.
 - The daemon handles reconnects itself. `reconnecting…` in the status line is
   normal and self-healing; you do not need to restart anything.

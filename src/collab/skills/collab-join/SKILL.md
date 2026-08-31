@@ -20,6 +20,9 @@ throw away everything after it.
 `--focus` is what the other agent sees when you arrive, so make it specific:
 `"the client side of the auth refactor"`, not `"coding"`.
 
+`--name` is optional; without it collab uses the user's global name. Names must
+be unique in a session, so pass one if the default is already taken.
+
 If collab is not installed, follow `AGENT_INSTALL.md` first.
 
 **If the join is refused** with *the name is already taken*, someone in the

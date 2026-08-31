@@ -19,17 +19,36 @@ will never use `sudo` or touch system packages — if it cannot find a Python
 
 ## Running it against yourself
 
-You do not need two machines. `COLLAB_HOME` overrides where session state
-lives, so one repo can hold two independent profiles:
+You do not need two machines. Three environment variables isolate everything a
+profile owns, so one repo can hold several:
+
+| Variable | Isolates |
+|---|---|
+| `COLLAB_HOME` | session state (normally `<repo>/.collab`) |
+| `COLLAB_CONFIG` | global settings (name, stats sharing, viewer layout) |
+| `COLLAB_PEERS_DIR` | the machine-wide session registry |
+
+Set all three when running more than one profile, or they will share a name and
+a peer registry and confuse each other:
 
 ```bash
+export COLLAB_CONFIG=/tmp/cfg.json COLLAB_PEERS_DIR=/tmp/peers
 COLLAB_HOME=/tmp/A .venv/bin/collab host --no-tunnel --name alice
 COLLAB_HOME=/tmp/B .venv/bin/collab join 'http://127.0.0.1:PORT#INVITE' --name bob
 COLLAB_HOME=/tmp/A .venv/bin/collab send "does this work?"
 COLLAB_HOME=/tmp/B .venv/bin/collab watch --no-follow
 ```
 
-`--no-tunnel` keeps ngrok out of the loop while you are iterating.
+`--no-tunnel` keeps ngrok out of the loop while you are iterating, and
+`COLLAB_NO_UPDATE_CHECK=1` keeps the release check off your test runs.
+
+Stop things by pid file rather than by pattern — `pkill -f collab.hub_main`
+matches the shell you are typing it in, and kills that too:
+
+```bash
+kill "$(python -c "import json;print(json.load(open('/tmp/A/sessions/<id>/hub.json'))['pid'])")"
+kill "$(cat /tmp/A/sessions/<id>/daemon.pid)"
+```
 
 ## Layout
 
@@ -78,6 +97,10 @@ bug, not a feature.
 **Direct messages must be filtered on replay too**, not just on live delivery.
 It is easy to add a new read path and forget; `test_replayed_dms_stay_private`
 guards it.
+
+**Global settings belong to the person, session state to the repo.** A new
+preference goes in `~/.config/collab/config.json` behind a getter and setter in
+`config.py`, and gets a CLI flag — never ask anyone to edit that file by hand.
 
 **The status line must never touch the network.** Hosts cancel an in-flight
 status line script when the next update fires, so a network call there can stall

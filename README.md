@@ -71,7 +71,7 @@ From that moment both agents receive each other's messages as they happen.
 - [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start)
 - [Making an agent listen](#making-an-agent-listen) · [Commands](#commands)
 - [Watching the conversation](#watching-the-conversation) · [Status line](#status-line) · [Files](#sharing-files-and-artifacts)
-- [Security](#security) · [Where state lives](#where-state-lives)
+- [Security](#security) · [Settings](#settings)
 - [Sharing without ngrok](#sharing-without-ngrok) · [Troubleshooting](#troubleshooting)
 - [Protocol](SPEC.md) · [For agents](AGENT_INSTALL.md) · [Contributing](CONTRIBUTING.md)
 
@@ -523,27 +523,76 @@ A session URL is public once tunnelled. The token is what protects it — treat
 the join line like a password, and `collab kick` anyone who should no longer
 have it.
 
-## Where state lives
+## Settings
 
-State is **per repository**, so two checkouts on one machine are fully
-independent:
+Two kinds of state, deliberately split: **who you are and how you like things**
+is global, because it is a property of you; **a session** is per repository,
+because that is what it belongs to.
+
+### Global settings
+
+Kept in `~/.config/collab/config.json`. Every one has a command — you should
+never need to edit the file.
+
+| Setting | What it does | Set it with | Default |
+|---|---|---|---|
+| `display_name` | the name others see | `collab name <n>` | git `user.name`, else `$USER` |
+| `share_stats` | share your usage with the session | `collab stats --share on\|off` | `on` |
+| `watch_layout` | `split`, `tmux`, `chat` or `roster` | `collab watch --layout <l> --save` | `split` |
+| `watch_roster_size` | how much room the roster gets, in percent | `collab watch --roster-size <n> --save` | `30` |
+| `watch_roster_position` | `top`, `bottom`, `left` or `right` | `collab watch --roster-position <p> --save` | `top` |
+
+```bash
+collab name                       # show your current name
+collab name alice                 # set it (renames you live if you're in a session)
+collab stats --share off          # stop sharing your usage
+collab watch --layout tmux --save # remember a viewer layout
+```
+
+Alongside it, `~/.config/collab/` also holds:
 
 ```
-<repo-root>/.collab/            created on first host/join, self-gitignoring
-  current                       which session this repo is in
+peers/                    one record per live session on this machine, 0600
+                          (a host's carries a live invite, hence the mode)
+update-check.json         the cached answer about newer releases
+```
+
+### Per-repository state
+
+Created on first `host` or `join`, and self-gitignoring because it holds tokens:
+
+```
+<repo-root>/.collab/
+  .gitignore              contains "*", so none of this is ever committed
+  current                 which session this repo is in
   sessions/<id>/
-    hub.json  hub.db            host only: credentials (0600) and the event log
-    files/                      host only: uploads awaiting collection
-    profile.json                your token and name (0600)
-    inbox.db  inbox.jsonl       your local copy of the feed
-    status.json                 what the status line reads
-    daemon.pid  daemon.log
-
-~/.config/collab/config.json    the only global file: your display name
+    profile.json          your token, name and participant id (0600)
+    inbox.db              your local copy of the feed, and the resume cursor
+    inbox.jsonl           the same events as lines — what `collab listen` tails
+    snapshot.json         the last roster, so the viewer works offline
+    status.json           what the status line reads
+    agent_stats.json      usage your agent reported, waiting to be shared
+    daemon.pid daemon.log the listener
+    hub.json              host only: port, invite and host token (0600)
+    hub.db                host only: the session's event log
+    hub.log ngrok.log     host only
+    files/                host only: uploads awaiting collection
 ```
 
-`COLLAB_HOME` overrides the location — that is how two profiles can share one
-repo for testing.
+### Environment variables
+
+Mostly for testing and for running two profiles against one repo.
+
+| Variable | Effect |
+|---|---|
+| `COLLAB_HOME` | use this directory instead of `<repo>/.collab` |
+| `COLLAB_CONFIG` | use this file instead of `~/.config/collab/config.json` |
+| `COLLAB_PEERS_DIR` | use this directory for the local session registry |
+| `COLLAB_NAME` | display name, overriding the global setting |
+| `COLLAB_NO_UPDATE_CHECK=1` | never check for new releases |
+| `COLLAB_NO_TUNNEL=1` | never start a tunnel (same as `collab host --no-tunnel`) |
+| `NO_COLOR` | plain output everywhere, including the status line |
+| `CLAUDE_CONFIG_DIR` | where `collab statusline`/`skills` install to |
 
 ## Sharing without ngrok
 

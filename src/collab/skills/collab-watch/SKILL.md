@@ -85,6 +85,19 @@ exit rather than leaving a follower running:
 That is also the right form when *you* need to catch up on the conversation
 before answering.
 
+## What the roster tells you
+
+The top pane is not decoration. Each participant shows their repo and branch,
+their machine, and — where their agent exposes it — model, spend, quota and
+context use. That is what to look at before suggesting who takes the next task:
+
+```
+ ● bob (same machine)         the client side
+     webapp/main · RPEREZ · Opus 5 · quota 5h 88% 7d 30% · $3.10
+```
+
+`collab stats --json` gives you the same figures to act on directly.
+
 ## What they will see
 
 ```

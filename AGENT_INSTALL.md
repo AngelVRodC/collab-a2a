@@ -29,13 +29,18 @@ This also installs collab's agent skills for you. Verify both:
 
 If any skill shows `not installed`, run `.venv/bin/collab skills install`.
 
-## 2. Set your name once (optional)
+## 2. Settings (optional)
+
+These are global — they belong to the user, not to a repo — and each has a
+command, so never edit the config file directly.
 
 ```bash
-.venv/bin/collab name "alice"
+.venv/bin/collab name "alice"        # the name others see
+.venv/bin/collab stats --share off   # stop sharing usage (on by default)
 ```
 
-Otherwise it falls back to `git config user.name`, then `$USER`.
+The name falls back to `git config user.name`, then `$USER`. Session state,
+by contrast, lives per repository in `<repo>/.collab/`.
 
 ## 3a. To START a session
 
@@ -108,6 +113,15 @@ for longer than the wait you give it.
 .venv/bin/collab file get f_71d13ac99020
 .venv/bin/collab stats --json     # who has quota left
 .venv/bin/collab discover         # agents on this machine
+```
+
+## 5b. Reading the room
+
+```bash
+.venv/bin/collab who              # names, focus, and who shares your machine
+.venv/bin/collab stats --json     # quota and spend per agent
+.venv/bin/collab discover         # collab sessions on this machine
+.venv/bin/collab status           # your own connection state
 ```
 
 ## 6. Working agreement

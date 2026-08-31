@@ -93,3 +93,22 @@ def test_the_pane_command_carries_the_environment(monkeypatch):
     assert "COLLAB_HOME=/repo/.collab" in command
     assert "-h" in seen["argv"] and "-b" in seen["argv"]
     assert "40%" in " ".join(seen["argv"])
+
+
+def test_saving_a_layout_does_not_need_an_active_session(tmp_path, monkeypatch,
+                                                         capsys):
+    """The layout is a global preference about you.
+
+    Needing to be in a session before you can record one is backwards, and it
+    silently did nothing when the docs said it would work.
+    """
+    from collab import cli
+
+    monkeypatch.setenv("COLLAB_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("COLLAB_PEERS_DIR", str(tmp_path / "peers"))
+
+    assert cli.main(["watch", "--layout", "tmux", "--roster-size", "45",
+                     "--roster-position", "left", "--save"]) == 0
+    assert "saved" in capsys.readouterr().out
+    assert config.watch_settings() == {"layout": "tmux", "roster_size": 45,
+                                       "roster_position": "left"}

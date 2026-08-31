@@ -564,18 +564,24 @@ def cmd_watch(args: argparse.Namespace) -> int:
     """A readable live transcript, for a person to leave open in a pane."""
     from .client import watch as w
 
-    profile = _require_profile(args)
-
     saved = watch_settings()
     layout = args.layout or saved["layout"]
     roster_size = args.roster_size or saved["roster_size"]
     roster_position = args.roster_position or saved["roster_position"]
 
+    # Saving happens before we look for a session: the layout is a global
+    # preference about you, so needing to be in a session to record one would
+    # be backwards.
     if args.save:
         saved = save_watch_settings(layout=layout, roster_size=roster_size,
                                     roster_position=roster_position)
         ok(f"saved: layout {saved['layout']}, roster {saved['roster_size']}% "
            f"{saved['roster_position']}")
+        if SessionProfile.current() is None:
+            print(dim("       it will be used the next time you watch a session"))
+            return 0
+
+    profile = _require_profile(args)
 
     if args.tmux:
         argv = [str(Path(sys.argv[0]).resolve()), "watch",
