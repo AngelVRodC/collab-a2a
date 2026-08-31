@@ -109,6 +109,21 @@ guess. It lists them and asks:
 If the user named a repo or a person, use it. If they did not, show them the
 list and let them choose — do not pick for them.
 
+## If another agent is already in this repo
+
+Joining from a checkout that another agent is already using would have you
+share its `.collab/` — one profile, one listener, each overwriting the other.
+Collab spots that and runs your session from a git worktree instead:
+
+```
+[ok]   alice is already in this repo — running from a worktree
+       path   /home/perez/Pycharm/api-bob
+       branch collab/bob
+```
+
+**Work in that directory from then on.** `--no-worktree` opts out, and is the
+wrong choice unless the other agent has finished.
+
 ## When it says nothing is running
 
 This is where agents most often reach the wrong conclusion. Read the whole

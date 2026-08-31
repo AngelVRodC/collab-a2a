@@ -25,8 +25,10 @@ from .client.hub_client import HubClient, HubError
 from .client.inbox import Inbox
 from .config import (
     SessionProfile,
+    collab_executable,
     collab_home,
     ensure_home,
+    repo_root,
     resolve_name,
     set_default_name,
     save_watch_settings,
@@ -169,6 +171,8 @@ def _short_state(state: str) -> str:
 def cmd_host(args: argparse.Namespace) -> int:
     _warn_outside_venv()
     _preflight_update(args)
+    if (code := _relocate_to_worktree(args, args.name or resolve_name())) is not None:
+        return code
     ensure_home()
     name = resolve_name(args.name)
     port = args.port or free_port()
@@ -348,9 +352,60 @@ def _describe_stopped(entries: list[tuple[Any, dict[str, int]]]) -> None:
         print(f"    {c(cfg.session_id, '36')}  {dim('stopped')}  {detail}")
 
 
+def _relocate_to_worktree(args: argparse.Namespace, name: str) -> int | None:
+    """If another agent already holds this repo's collab state, move aside.
+
+    Returns the exit code of the relocated run, or None to carry on here. The
+    check is a *running listener*, not a profile on disk — a stopped session
+    leaves a profile behind and that is not somebody being here.
+
+    Re-running ourselves in the worktree rather than pointing COLLAB_HOME at it
+    keeps every downstream step honest: the repo and branch reported to the
+    roster, the daemon's working directory, and where `collab` finds the
+    session next time are then all the same place.
+    """
+    from . import worktree as wt
+
+    if getattr(args, "no_worktree", False):
+        return None
+    taken = wt.occupant()
+    if taken is None:
+        return None
+
+    repo = repo_root()
+    try:
+        tree = wt.create(repo, name, Path(args.worktree) if args.worktree else None)
+    except RuntimeError as exc:
+        # Never fall through into the collision: the first agent goes quiet and
+        # nothing says why.
+        fail(f"{taken.name} is already using this repo's collab state")
+        print(dim(f"  a worktree would keep you apart, but: {exc}"))
+        print(dim("  give this agent its own state with"
+                  " COLLAB_HOME=<dir> collab join …, or work in another checkout"))
+        return 1
+
+    ok(f"{taken.name} is already in this repo — running from a worktree")
+    print(dim(f"       path   {tree.path}"))
+    print(dim(f"       branch {tree.branch}"))
+    print(dim("       work there, not in the original checkout"))
+
+    argv = [collab_executable(), *sys.argv[1:], "--no-worktree"]
+    # The child inherits this stdout and writes to it immediately; ours is
+    # block-buffered when piped, so without this our explanation of what just
+    # happened arrives after the output it is meant to introduce.
+    sys.stdout.flush()
+    completed = subprocess.run(argv, cwd=str(tree.path))
+    if completed.returncode == 0:
+        print(dim(f"\n  remove it when you are done:"
+                  f" git -C {repo} worktree remove {tree.path}"))
+    return completed.returncode
+
+
 def cmd_join(args: argparse.Namespace) -> int:
     _warn_outside_venv()
     _preflight_update(args)
+    if (code := _relocate_to_worktree(args, args.name or resolve_name())) is not None:
+        return code
     ensure_home()
 
     url = args.url
@@ -1325,6 +1380,10 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--bind", default="127.0.0.1",
                    help="interface to bind; 0.0.0.0 exposes it on your LAN")
     h.add_argument("--focus", default="", help="what you are working on, shown to others")
+    h.add_argument("--worktree", default="", metavar="PATH",
+                        help="run from this git worktree instead of the repo itself")
+    h.add_argument("--no-worktree", action="store_true",
+                        help="join in place even if another agent is already using this repo")
     h.add_argument("--title", default="",
                    help="a name for the session, shown to everyone")
     h.add_argument("--domain", default="",
@@ -1363,6 +1422,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="join a session running on this machine, no link needed")
     j.add_argument("--name", help="your display name")
     j.add_argument("--focus", default="", help="what you are working on, announced on arrival")
+    j.add_argument("--worktree", default="", metavar="PATH",
+                        help="run from this git worktree instead of the repo itself")
+    j.add_argument("--no-worktree", action="store_true",
+                        help="join in place even if another agent is already using this repo")
     j.add_argument("--no-daemon", action="store_true", help="do not start listening")
     j.add_argument("--no-update-check", action="store_true",
                    help="do not check for a newer collab first")

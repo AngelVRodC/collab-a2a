@@ -37,6 +37,8 @@ from .inbox import Inbox
 #: read continuously, so it keeps the majority.
 ROSTER_SHARE = 0.30
 MIN_ROSTER_ROWS = 3
+#: Lines per wheel notch. Three is what terminals and pagers settled on.
+WHEEL_LINES = 3
 POLL_SECONDS = 0.25
 
 # Colour pair ids.
@@ -357,6 +359,8 @@ class Tui:
         self.roster = Pane(follow=False)
         self.chat = Pane()
         self.focus = "roster" if self.view == "roster" else "chat"
+        #: Where the conversation starts, so the wheel can tell the panes apart.
+        self._chat_top = 0
 
     # -- drawing ------------------------------------------------------------
 
@@ -427,7 +431,10 @@ class Tui:
         body_top = 2
         body_height = height - body_top - 1
         roster_h = max(int(body_height * ROSTER_SHARE), MIN_ROSTER_ROWS)
-        roster_h = min(roster_h, body_height - 4)
+        # Leave the conversation room to exist, but never squeeze the roster
+        # out entirely: at MIN_ROSTER_ROWS-1 visible rows it renders nothing at
+        # all, and a pane you cannot see is a pane you cannot scroll.
+        roster_h = min(roster_h, max(body_height - 4, 2))
 
         rows = roster_rows(self.model, width - 1)
         self.roster.rows = roster_h - 1
@@ -435,10 +442,12 @@ class Tui:
         self.roster.settle()
         hidden = max(len(rows) - self.roster.rows - self.roster.offset, 0)
         label = f"PARTICIPANTS ({len(people)})"
+        # Rows are not people — two lines each — so a range of row numbers
+        # beside a head count reads as a contradiction. Say which way there is
+        # more instead, which is the only thing the number was for.
         if hidden or self.roster.offset:
-            label += f" · {self.roster.offset + 1}-" \
-                     f"{min(self.roster.offset + self.roster.rows, len(rows))}" \
-                     f" of {len(rows)}"
+            more = ("▴" if self.roster.offset else "") + ("▾" if hidden else "")
+            label += f" · scroll {more} (tab, or [ ])"
         self._hline(win, body_top, width, label)
         for i in range(self.roster.rows):
             idx = self.roster.offset + i
@@ -449,6 +458,7 @@ class Tui:
                         curses.color_pair(r.pair) | r.attr)
 
         chat_top = body_top + roster_h
+        self._chat_top = chat_top
         self._hline(win, chat_top, width, "CONVERSATION")
 
         chat_rows: list[Row] = []
@@ -466,7 +476,7 @@ class Tui:
                         curses.color_pair(r.pair) | r.attr)
 
         # --- help ----------------------------------------------------------
-        hint = " tab: pane · ↑↓ pgup/pgdn: scroll · g/G: top/end · q: quit "
+        hint = " wheel/tab: pane · ↑↓ pgup/pgdn: scroll · [ ]: roster · g/G: top/end · q: quit "
         if not self.chat.follow:
             hint = " ⏸ scrolled back — G to resume following ·" + hint
         win.addnstr(height - 1, 0, hint[:width - 1], width - 1,
@@ -475,10 +485,53 @@ class Tui:
 
     # -- input --------------------------------------------------------------
 
+    def pane_at(self, y: int) -> str:
+        """Which pane is under this screen row.
+
+        The wheel should scroll what the pointer is over — asking someone to
+        first tab focus across and then scroll is asking them to know the
+        thing they are trying to find out.
+        """
+        if self.view != "both":
+            return "roster" if self.view == "roster" else "chat"
+        if self._chat_top and y >= self._chat_top:
+            return "chat"
+        return "roster"
+
+    def handle_mouse(self) -> bool:
+        """One wheel notch. Silent when the terminal reports no mouse."""
+        try:
+            _, _, y, _, state = curses.getmouse()
+        except curses.error:
+            return True
+        where = self.pane_at(y)
+        pane = self.roster if where == "roster" else self.chat
+        up = state & getattr(curses, "BUTTON4_PRESSED", 0)
+        # Wheel-down is button 5 wherever ncurses was built with five buttons.
+        # Where it was not, the wheel arrives as button 2 instead — and there,
+        # middle-click is indistinguishable from a scroll, so only fall back to
+        # it when there is no button 5 to prefer.
+        if hasattr(curses, "BUTTON5_PRESSED"):
+            down = state & curses.BUTTON5_PRESSED
+        else:
+            down = state & getattr(curses, "BUTTON2_PRESSED", 0)
+        if up:
+            pane.scroll(-WHEEL_LINES)
+        elif down:
+            pane.scroll(WHEEL_LINES)
+        else:
+            return True
+        # Scrolling a pane is also a statement about which one you care about.
+        if self.view == "both":
+            self.focus = where
+        return True
+
     def handle(self, key: int) -> bool:
         """Returns False when the user asked to leave."""
         if self.view != "both":
             self.focus = "roster" if self.view == "roster" else "chat"
+        if key == curses.KEY_MOUSE:
+            return self.handle_mouse()
         pane = self.roster if self.focus == "roster" else self.chat
         # Deliberately not ESC: terminals send a bare ESC as the first byte of
         # every escape sequence — focus events, bracketed paste, cursor-position
@@ -499,6 +552,12 @@ class Tui:
             pane.to_start()
         elif key == ord("G"):
             pane.to_end()
+        # The roster is the pane you dip into and leave, so it gets keys that
+        # do not require taking focus away from the conversation first.
+        elif key in (ord("["), curses.KEY_SR):
+            self.roster.scroll(-1)
+        elif key in (ord("]"), curses.KEY_SF):
+            self.roster.scroll(1)
         return True
 
     # -- single-pane views ---------------------------------------------------
@@ -538,7 +597,7 @@ class Tui:
             win.addnstr(1 + i, 0, r.text, width - 1,
                         curses.color_pair(r.pair) | r.attr)
 
-        hint = " ↑↓ pgup/pgdn: scroll · g/G: top/end · q: quit "
+        hint = " wheel · ↑↓ pgup/pgdn: scroll · g/G: top/end · q: quit "
         win.addnstr(height - 1, 0, hint[:width - 1], width - 1,
                     curses.color_pair(C_DIM) | curses.A_DIM)
 
@@ -569,6 +628,17 @@ def run(profile: SessionProfile, view: str = "both") -> int:
             pass  # some terminals cannot hide the cursor
         win.nodelay(True)
         win.keypad(True)
+        # Ask for wheel events. A terminal that cannot do mice simply never
+        # sends any, so this costs nothing where it is not supported — but
+        # without it the wheel scrolls the terminal's scrollback instead, which
+        # looks exactly like a pane that refuses to scroll.
+        try:
+            # Buttons only. Asking for motion reports as well turns every
+            # pointer movement over the pane into an event to drain.
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+            curses.mouseinterval(0)
+        except (AttributeError, curses.error):
+            pass
         # Swallow the terminal's own replies rather than treating them as input.
         try:
             curses.set_escdelay(25)

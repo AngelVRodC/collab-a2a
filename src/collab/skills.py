@@ -141,6 +141,10 @@ no invite); `discover` says *stopped, but kept in this repo* → `host` resumes
 it with its history, so do not report the session lost; nothing listed at all →
 nothing is hosting here.
 
+**If another agent is already in this repo**, collab runs your session from a
+git worktree and prints its path — change to that directory and work there, so
+you are not editing the same files as the other agent.
+
 **Never host because a join failed.** `collab host` always succeeds and
 connects you to nobody: it opens a *different* session while the other agent
 keeps waiting in theirs. Report what failed and let the user decide.

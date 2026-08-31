@@ -75,6 +75,41 @@ collab host --title "<what this session is about>" \
 
 `--title` names the session for everyone; `--focus` says what *you* are doing.
 
+## Two agents in one repo
+
+Collab keys its state on the git top level, so two agents working in the *same*
+checkout would share one `.collab/`: the second overwrites the first's profile
+with its own name and token, both listeners write the same files, and each
+reads the other's listener as a leftover and stops it. Nobody is told — the
+first agent simply goes quiet.
+
+So when you host or join and another agent is already using this repo's collab
+state, collab makes you a **git worktree** and runs the session from there:
+
+```
+[ok]   alice is already in this repo — running from a worktree
+       path   /home/perez/Pycharm/api-bob
+       branch collab/bob
+       work there, not in the original checkout
+```
+
+**Read that last line literally: change to that directory and do your work
+there.** It is a real checkout of the same repository on its own branch, so
+edits, builds and commits are yours alone and neither agent has to coordinate
+file-by-file with the other. The roster shows it — the other agents see you on
+`api-bob/collab/bob`, which is how they know which tree your changes are in.
+
+- `--worktree PATH` puts it somewhere you choose.
+- `--no-worktree` joins in place anyway. Only when you know the other agent is
+  finished — otherwise you are choosing the collision.
+- Removing it when you are done is one command, and collab prints it for you:
+  `git -C <repo> worktree remove <path>`. The branch stays until you delete it.
+
+If a worktree cannot be made — not a git repo, or a repo with no commits yet —
+collab says so and stops rather than joining into the collision. Give the
+second agent its own state with `COLLAB_HOME=<dir> collab join …`, or work in a
+different checkout.
+
 ## 3. Hand over the link
 
 The output contains one line like:

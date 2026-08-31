@@ -112,6 +112,23 @@ collab watch --no-follow --limit 50
 That is also the right form when *you* need to catch up on the conversation
 before answering.
 
+## Moving around in it
+
+Both panes scroll on their own, and the mouse wheel scrolls whichever one the
+pointer is over — the roster at the top, the conversation below.
+
+| | |
+|---|---|
+| wheel | scroll the pane under the pointer |
+| `tab` | move focus between the panes |
+| `↑` `↓` `k` `j` | scroll the focused pane |
+| `[` `]` | scroll the roster without leaving the conversation |
+| `g` `G` | jump to the top / back to the live end |
+| `q` | quit the viewer (the session keeps running) |
+
+The conversation follows new messages until you scroll back; `G` resumes
+following. The roster header shows `▴▾` when there is more above or below.
+
 ## What the roster tells you
 
 The top pane is not decoration. Each participant shows their repo and branch,

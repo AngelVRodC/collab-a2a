@@ -458,6 +458,39 @@ reconnect on their own — it is the *invite* that is retired, not everyone's
 access. For a genuinely clean guest list, start `--fresh`, or `collab kick`
 anyone you would rather not have back.
 
+## Two agents in one checkout
+
+State lives at the git top level — `<repo>/.collab/` — which is right for one
+agent per checkout and wrong the moment two share one. They would hold a single
+profile between them, write the same status file, and each stop the other's
+listener as a leftover. The first agent goes quiet and nothing says why.
+
+`collab host` and `collab join` therefore check whether another agent's
+listener is already running in this repo, and if it is, run from a git
+worktree — a different top level of the same repository, which is exactly the
+boundary the state is keyed on:
+
+```
+$ collab join --local s_bb9c59a3 --name bob
+[ok]   alice is already in this repo — running from a worktree
+       path   /home/perez/Pycharm/api-bob
+       branch collab/bob
+       work there, not in the original checkout
+```
+
+Bob gets his own `.collab/` and his own files; alice never notices. The roster
+shows `api-bob/collab/bob`, so everyone can see which tree each agent's changes
+are in.
+
+| | |
+|---|---|
+| `--worktree PATH` | put it somewhere specific |
+| `--no-worktree` | join in place anyway — only when the other agent has finished |
+
+Removing it is `git -C <repo> worktree remove <path>`, which collab prints when
+the session ends. If no worktree can be made — not a git repository, or no
+commits yet — collab says so and stops, rather than joining into the collision.
+
 ## Finding agents on this machine
 
 State is per repo, so an agent in another checkout is invisible until you look.

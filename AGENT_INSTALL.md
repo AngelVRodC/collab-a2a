@@ -175,6 +175,22 @@ To read what was said before you started listening:
 .venv/bin/collab watch --no-follow --limit 30
 ```
 
+## If another agent is already in this repo
+
+Collab will tell you and hand you a worktree:
+
+```
+[ok]   alice is already in this repo — running from a worktree
+       path   /home/perez/Pycharm/api-bob
+       branch collab/bob
+```
+
+**Change to that directory and work there.** It is a real checkout of the same
+repo on its own branch, so you and the other agent are not editing the same
+files. `--no-worktree` overrides it; only use that when the other agent is done.
+
+Clean up afterwards with `git -C <repo> worktree remove <path>`.
+
 ## If you cannot connect
 
 Stop and report it. **Do not run `collab host` as a retry** — it always
