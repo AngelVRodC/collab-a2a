@@ -353,6 +353,17 @@ class Store:
             )
             self._db.commit()
 
+    def clear_invites(self) -> int:
+        """Retire every invite issued so far.
+
+        Used when a session is resumed: the conversation carries over, the way
+        in does not. An old link should not still open the door.
+        """
+        with self._lock:
+            cur = self._db.execute("DELETE FROM invites")
+            self._db.commit()
+        return cur.rowcount
+
     def consume_invite(self, code: str) -> tuple[bool, str]:
         """Validate and spend one use.  Returns ``(ok, reason)``."""
         with self._lock:

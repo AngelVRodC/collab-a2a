@@ -39,7 +39,8 @@ from .config import (
 from .client.context import gather as ctx_gather
 from .protocol import (DEFAULT_ROOM, MAX_FILE_BYTES, Envelope, KIND_CHAT,
                        KIND_HELLO)
-from .server.session import HubConfig, create_session, join_line
+from .server.session import (HubConfig, create_session, hosted_sessions,
+                             join_line, resume_session, session_summary)
 from .server.tunnel import NO_NGROK_HELP, free_port, local_ip, ngrok_version
 
 # --- output helpers ----------------------------------------------------------
@@ -62,6 +63,10 @@ def warn(msg: str) -> None:
 
 def fail(msg: str) -> None:
     print(f"{c('[fail]', '31')} {msg}", file=sys.stderr)
+
+
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def dim(msg: str) -> str:
@@ -166,8 +171,36 @@ def cmd_host(args: argparse.Namespace) -> int:
     ensure_home()
     name = resolve_name(args.name)
     port = args.port or free_port()
-    cfg = create_session(name, port, bind=args.bind, domain=args.domain,
-                         title=args.title or args.focus or "")
+
+    # A session is a conversation and a task board. Closing the terminal should
+    # not throw those away, so a repo's previous session is picked up by
+    # default and starting clean is the deliberate choice.
+    previous = hosted_sessions()
+    wanted = args.resume if isinstance(args.resume, str) else None
+    if wanted:
+        previous = [c for c in previous if c.session_id == wanted] or previous
+
+    if previous and not args.fresh:
+        cfg = resume_session(previous[0], port, bind=args.bind, domain=args.domain)
+        if args.title:
+            cfg.title = args.title
+            cfg.save()
+        counts = session_summary(cfg)
+        title = f" · {cfg.title}" if cfg.title else ""
+        ok(f"resumed {c(cfg.session_id, '36')}{title}")
+        if counts:
+            kept = (f"{plural(counts.get('messages', 0), 'message')}, "
+                    f"{plural(counts.get('open_tasks', 0), 'open task')} kept")
+            print(f"       {dim(kept)}")
+        print(f"       {dim('new invite — any link shared before no longer works')}")
+        print(f"       {dim('start clean instead with: collab host --fresh')}")
+    else:
+        cfg = create_session(name, port, bind=args.bind, domain=args.domain,
+                             title=args.title or args.focus or "")
+        if previous:
+            note = ("started a new session; the previous one is kept and can be "
+                    "brought back with `collab host --resume`")
+            print(f"       {dim(note)}")
 
     env = {**os.environ, "COLLAB_HOME": cfg.home}
     if args.no_tunnel:
@@ -461,19 +494,17 @@ def cmd_task(args: argparse.Namespace) -> int:
 
 
 def _stat_bits(person: dict[str, Any]) -> list[str]:
+    from .stats import quota_summary
+
     stats = person.get("stats") or {}
     bits = []
     if stats.get("model"):
         bits.append(str(stats["model"]))
     if stats.get("cost_usd") is not None:
         bits.append(f"${float(stats['cost_usd']):.2f}")
-    if stats.get("quota_five_hour") is not None:
-        bits.append(f"5h {float(stats['quota_five_hour']):.0f}%")
-    if stats.get("quota_seven_day") is not None:
-        bits.append(f"7d {float(stats['quota_seven_day']):.0f}%")
-    if stats.get("quota_used_pct") is not None:
-        # Agents that report one figure rather than per-window ones.
-        bits.append(f"quota {float(stats['quota_used_pct']):.0f}%")
+    # Every window the agent has, with how long until each rolls over.
+    if (quota := quota_summary(stats, with_resets=True)):
+        bits.append(quota)
     if stats.get("tokens_in") is not None:
         bits.append(f"{int(stats['tokens_in']) / 1000:.0f}k in")
     if stats.get("tokens_out") is not None:
@@ -591,6 +622,39 @@ def cmd_stats(args: argparse.Namespace) -> int:
     else:
         print(dim("  yours are not refreshed automatically — set a command with "
                   "`collab stats --source`, or report with `--report`"))
+    print()
+    return 0
+
+
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """Previous sessions in this repo, and what resuming one would bring back."""
+    found = hosted_sessions()
+    if args.json:
+        print(json.dumps([{"session_id": cfg.session_id, "title": cfg.title,
+                           **session_summary(cfg)} for cfg in found], indent=2))
+        return 0
+
+    heading(f"sessions hosted in {collab_home()}")
+    if not found:
+        print(dim("  none yet — `collab host` starts one"))
+        return 0
+
+    current = SessionProfile.current()
+    for i, cfg in enumerate(found):
+        counts = session_summary(cfg)
+        mark = "*" if current and current.session_id == cfg.session_id else " "
+        latest = dim(" (most recent)") if i == 0 else ""
+        title = f"  {cfg.title}" if cfg.title else ""
+        print(f" {mark} {c(cfg.session_id, '36')}{title}{latest}")
+        if counts:
+            detail = " · ".join((plural(counts["messages"], "message"),
+                                 plural(counts["tasks"], "task"),
+                                 plural(counts["participants"], "participant")))
+            print(f"      {dim(detail)}")
+    print()
+    print(dim("  collab host                resumes the most recent"))
+    print(dim("  collab host --resume <id>  resumes a particular one"))
+    print(dim("  collab host --fresh        starts an empty one"))
     print()
     return 0
 
@@ -998,7 +1062,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not check for a newer collab first")
     h.add_argument("--update", action="store_true",
                    help="install a newer collab without asking, if there is one")
+    h.add_argument("--fresh", action="store_true",
+                   help="start an empty session instead of resuming this repo's last one")
+    h.add_argument("--resume", nargs="?", const=True, metavar="SESSION_ID",
+                   help="resume a previous session (the most recent by default)")
     h.set_defaults(func=cmd_host)
+
+    ss = sub.add_parser("sessions", help="sessions this repo has hosted before")
+    ss.add_argument("--json", action="store_true")
+    ss.set_defaults(func=cmd_sessions)
 
     j = sub.add_parser("join", help="join a session and start collaborating")
     j.add_argument("url", nargs="?", default="",

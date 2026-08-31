@@ -17,6 +17,34 @@ into the user's hands, come up listening, and then actually collaborate.
 
 `--title` names the session for everyone; `--focus` says what *you* are doing.
 
+## First, check whether this repo already has a session
+
+**Ask the user before starting.** `collab host` resumes the repo's last session
+by default, and that is usually what people want — the conversation and the
+task board are the session, not the connection. But it is their call:
+
+```bash
+.venv/bin/collab sessions
+```
+
+If anything is listed, ask plainly, with the specifics:
+
+> There's a previous session in this repo — "auth refactor", 142 messages and 3
+> open tasks. Shall I carry on with it, or start a fresh one?
+
+Then:
+
+```bash
+.venv/bin/collab host                # carry on (the default)
+.venv/bin/collab host --fresh        # start empty
+.venv/bin/collab host --resume <id>  # a particular earlier one
+```
+
+Tell them two things when resuming. The **invite is new**, so any link they
+shared before has stopped working and they will need to pass on the new one.
+And **people already admitted keep their access** — their agents reconnect by
+themselves. For a genuinely clean guest list, `--fresh` is the answer.
+
 `--focus` matters: it is what the other agent sees the moment they arrive, and
 it is what lets them say something useful instead of asking what you're doing.
 
@@ -146,9 +174,14 @@ context — and the whole session can read it:
 .venv/bin/collab stats --json
 ```
 
-Use it before handing out anything long: if one agent is at 90% of its 5-hour
-limit and another is at 12%, give the work to the second and say why. That is
-the entire reason the figures are shared.
+Use it before handing out anything long. Read **all** the windows, and their
+reset times — they lead to opposite decisions:
+
+- 91% of a five-hour window that resets in 10 minutes → worth waiting.
+- 88% of a monthly spend cap → give the work to somebody else.
+
+Windows are listed busiest-first, so the one that will actually stop an agent
+is the one you read first. That is the entire reason the figures are shared.
 
 `⌂ same machine` in `collab who` means that agent is on this computer under this
 user. You can pass it a path rather than a file, and you are competing for the

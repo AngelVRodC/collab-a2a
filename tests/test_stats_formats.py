@@ -124,3 +124,88 @@ def test_every_canonical_field_survives_a_round_trip():
               "lines_removed": 12}
     assert set(sample) == set(CANONICAL), "a new field needs a test"
     assert sanitise(normalise(sample)) == sample
+
+
+# --- every quota window, not a fixed two -------------------------------------
+
+def test_all_three_claude_code_windows_survive():
+    """The spend limit was being dropped entirely."""
+    got = normalise({"rate_limits": {
+        "five_hour": {"used_percentage": 42.3, "resets_at": "2026-09-01T14:00:00Z"},
+        "seven_day": {"used_percentage": 11.8, "resets_at": "2026-09-05T00:00:00Z"},
+        "spend_limit": {"used_percentage": 30.0, "resets_at": "2026-10-01T00:00:00Z"},
+    }})
+    assert set(got["quotas"]) == {"five_hour", "seven_day", "spend_limit"}
+    assert got["quotas"]["spend_limit"]["used_pct"] == 30.0
+
+
+def test_each_window_keeps_its_own_reset():
+    """One shared reset cannot say *which* window rolls over in ten minutes."""
+    got = normalise({"rate_limits": {
+        "five_hour": {"used_percentage": 90, "resets_at": "SOON"},
+        "seven_day": {"used_percentage": 10, "resets_at": "LATER"},
+    }})
+    assert got["quotas"]["five_hour"]["resets_at"] == "SOON"
+    assert got["quotas"]["seven_day"]["resets_at"] == "LATER"
+
+
+def test_an_agent_can_report_windows_we_have_never_heard_of():
+    """The list of windows keeps growing; unknown ones must not be dropped."""
+    got = normalise({"quotas": {"requests_per_minute": {"used_pct": 5},
+                                "monthly": {"used_pct": 60}}})
+    assert got["quotas"]["requests_per_minute"]["used_pct"] == 5.0
+    assert got["quotas"]["monthly"]["used_pct"] == 60.0
+
+
+def test_the_old_flat_fields_are_still_emitted():
+    """Anything reading quota_five_hour keeps working."""
+    got = normalise({"rate_limits": {"five_hour": {"used_percentage": 42},
+                                     "seven_day": {"used_percentage": 11}}})
+    assert got["quota_five_hour"] == 42.0
+    assert got["quota_seven_day"] == 11.0
+
+
+def test_the_old_flat_input_still_works():
+    got = normalise({"quota_five_hour": 73})
+    assert got["quota_five_hour"] == 73.0
+
+
+def test_remaining_is_inverted_per_window_too():
+    got = normalise({"rate_limits": {"weekly": {"remaining_percentage": 75}}})
+    assert got["quotas"]["seven_day"]["used_pct"] == 25.0
+
+
+def test_window_names_are_normalised():
+    got = normalise({"quotas": {"7d": {"used_pct": 1}, "opus_weekly": {"used_pct": 2}}})
+    assert "seven_day" in got["quotas"]
+    assert "seven_day_opus" in got["quotas"]
+
+
+def test_the_number_of_windows_is_capped():
+    """A roster line is not a dashboard."""
+    many = {"quotas": {f"w{i}": {"used_pct": i} for i in range(40)}}
+    assert len(sanitise(normalise(many))["quotas"]) <= 8
+
+
+def test_sanitise_keeps_the_map_but_drops_junk_inside_it():
+    dirty = {"quotas": {"five_hour": {"used_pct": 42, "resets_at": "x",
+                                      "nested": {"no": 1}}}}
+    kept = sanitise(dirty)["quotas"]["five_hour"]
+    assert kept == {"used_pct": 42.0, "resets_at": "x"}
+
+
+def test_the_busiest_window_is_shown_first():
+    """The one that will actually stop you is the one you are looking for."""
+    from collab.stats import quota_summary
+
+    line = quota_summary({"quotas": {
+        "five_hour": {"used_pct": 42}, "spend_limit": {"used_pct": 88},
+        "seven_day": {"used_pct": 12}}})
+    assert line.index("spend") < line.index("5h") < line.index("7d")
+
+
+def test_a_single_figure_agent_still_renders():
+    from collab.stats import quota_summary
+
+    assert "42%" in quota_summary({"quota_used_pct": 42.0})
+    assert quota_summary({}) == ""

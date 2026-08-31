@@ -78,22 +78,14 @@ def _fmt_pct(value: Any, label: str) -> str:
 
 
 def quota_text(stats: dict[str, Any]) -> str:
-    """The headroom figures, which are what you weigh when splitting work.
+    """Every allowance window this agent has, busiest first.
 
-    Some agents report per-window figures, others a single one; show whichever
-    the agent actually has.
+    Agents do not agree on which windows they have, so whatever they report is
+    shown rather than a fixed two.
     """
-    parts = []
-    if (q := _fmt_pct(stats.get("quota_five_hour"), "5h")):
-        parts.append(q)
-    if (q := _fmt_pct(stats.get("quota_seven_day"), "7d")):
-        parts.append(q)
-    if not parts and stats.get("quota_used_pct") is not None:
-        try:
-            return f"quota {float(stats['quota_used_pct']):.0f}%"
-        except (TypeError, ValueError):
-            return ""
-    return "quota " + " ".join(parts) if parts else ""
+    from ..stats import quota_summary
+
+    return quota_summary(stats, with_resets=True)
 
 
 def stat_line(person: dict[str, Any]) -> str:

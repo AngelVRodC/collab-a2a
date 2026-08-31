@@ -151,7 +151,19 @@ class Hub:
         merged = dict(meta.get("stats") or {})
         # Usage goes onto every participant's roster, so it is capped in size
         # and shape on the way in rather than trusted.
-        merged.update(sanitise(stats))
+        incoming = sanitise(stats)
+
+        # Quota windows merge one at a time. An agent that can only see its
+        # five-hour window right now must not erase the weekly one and the
+        # spend cap it told us about a minute ago.
+        if isinstance(incoming.get("quotas"), dict):
+            windows = dict(merged.get("quotas") or {})
+            for name, figures in incoming["quotas"].items():
+                if isinstance(figures, dict):
+                    windows[name] = {**windows.get(name, {}), **figures}
+            incoming = {**incoming, "quotas": windows}
+
+        merged.update(incoming)
         meta["stats"] = merged
         for key in ("machine", "machine_id", "user"):
             if stats.get(key):

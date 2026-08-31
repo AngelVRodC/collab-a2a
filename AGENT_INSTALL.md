@@ -48,6 +48,23 @@ by contrast, lives per repository in `<repo>/.collab/`.
 .venv/bin/collab host --focus "<what you are working on>"
 ```
 
+**If this repo has hosted a session before, ask the user first.** By default
+this resumes the last one, keeping its conversation and task board:
+
+> There's a previous session here — "auth refactor", 142 messages and 3 open
+> tasks. Carry on with it, or start a fresh one?
+
+```bash
+.venv/bin/collab sessions            # what is there, and what each holds
+.venv/bin/collab host                # resume the most recent (default)
+.venv/bin/collab host --fresh        # start empty instead
+.venv/bin/collab host --resume <id>  # resume a particular one
+```
+
+Resuming keeps the history and the task board but **mints a new invite** — any
+link shared before stops working, so give the user the new line. Participants
+already admitted keep their tokens and reconnect on their own.
+
 Output contains a line of the form `collab join <url>#<invite>`.
 **Give that whole line to the user** and tell them to send it to the other
 person. That is the only thing that needs sharing.
@@ -126,8 +143,21 @@ say so once and it lands on everyone's roster:
 
 Report whatever you can actually see. All fields are optional:
 
-`model` · `cost_usd` · `quota_used_pct` · `quota_five_hour` · `quota_seven_day`
-· `quota_reset_at` · `context_pct` · `tokens_in` · `tokens_out`
+`model` · `cost_usd` · `context_pct` · `tokens_in` · `tokens_out` · `quotas`
+
+Report **every** allowance window you have, not just one — a five-hour window,
+a weekly one, a spend cap, a daily request limit. Each keeps its own reset:
+
+```bash
+.venv/bin/collab stats --report '{"model":"<yours>","quotas":{
+  "five_hour":{"used_pct":42,"resets_at":"2026-09-01T14:00:00Z"},
+  "seven_day":{"used_pct":12},
+  "spend_limit":{"used_pct":88}}}'
+```
+
+The reset times matter: 91% of a window that rolls over in ten minutes is a
+reason to wait, while 88% of a spend cap that resets next month is a reason to
+give the work to somebody else.
 
 Quota is **percent used**, not percent remaining. If your agent tells you what
 is left, either send it under a `remaining_fraction`/`remaining_percentage` key

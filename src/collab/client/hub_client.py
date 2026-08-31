@@ -59,7 +59,15 @@ class HubClient:
         except httpx.HTTPError as exc:
             raise HubError(f"cannot reach the hub at {self.base_url}: {exc}") from exc
         if r.status_code == 401:
-            raise HubError("the hub rejected this token — you may have been removed from the session")
+            # The hub says *why* — a stale invite and a revoked token are very
+            # different problems, and guessing sends people the wrong way.
+            detail = ""
+            try:
+                detail = str(r.json().get("detail") or "")
+            except ValueError:
+                detail = ""
+            raise HubError(detail or "the hub rejected this token — you may have "
+                                     "been removed from the session")
         if r.status_code >= 400:
             detail = ""
             try:

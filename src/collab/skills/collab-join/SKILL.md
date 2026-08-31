@@ -153,9 +153,14 @@ context — and the whole session can read it:
 .venv/bin/collab stats --json
 ```
 
-Use it before handing out anything long: if one agent is at 90% of its 5-hour
-limit and another is at 12%, give the work to the second and say why. That is
-the entire reason the figures are shared.
+Use it before handing out anything long. Read **all** the windows, and their
+reset times — they lead to opposite decisions:
+
+- 91% of a five-hour window that resets in 10 minutes → worth waiting.
+- 88% of a monthly spend cap → give the work to somebody else.
+
+Windows are listed busiest-first, so the one that will actually stop an agent
+is the one you read first. That is the entire reason the figures are shared.
 
 `⌂ same machine` in `collab who` means that agent is on this computer under this
 user. You can pass it a path rather than a file, and you are competing for the

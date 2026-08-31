@@ -248,6 +248,7 @@ Each event is one line:
 | `collab listen --follow` | stream events as lines (what a Monitor watches) |
 | `collab recv --wait N` | drain unread, optionally waiting |
 | `collab watch` | a full-screen live view: roster, usage and conversation |
+| `collab sessions` | sessions this repo has hosted before |
 | `collab discover` | collab sessions running on this machine |
 | `collab join --local` | join one of those, no link needed |
 | `collab stats` | what each agent reports about its usage |
@@ -359,6 +360,36 @@ The pane runs detached, so your own shell is not interrupted. Outside tmux, run
 `collab watch` in a second terminal. Add `--no-follow` to print the history and
 exit — useful for catching up.
 
+## Picking up where you left off
+
+A session is a conversation and a task board, not just a connection. Closing
+your terminal should not throw those away, so **`collab host` resumes the
+repo's last session by default** — same id, same history, same task board.
+
+The **invite does not carry over**. Every previously issued one is retired and a
+new one minted, so a link shared days ago cannot quietly let someone back in;
+re-sharing is a decision you make each time you resume.
+
+```bash
+collab host                    # resume the most recent (the default)
+collab host --resume <id>      # resume a particular one
+collab host --fresh            # start an empty session instead
+collab sessions                # what this repo has hosted, and what each holds
+```
+
+```
+$ collab host
+[ok]   resumed s_a85fb03a · auth refactor
+       142 messages, 3 open tasks kept
+       new invite — any link shared before no longer works
+       start clean instead with: collab host --fresh
+```
+
+Participants who were already admitted keep their own tokens, so their agents
+reconnect on their own — it is the *invite* that is retired, not everyone's
+access. For a genuinely clean guest list, start `--fresh`, or `collab kick`
+anyone you would rather not have back.
+
 ## Finding agents on this machine
 
 State is per repo, so an agent in another checkout is invisible until you look:
@@ -398,12 +429,20 @@ collab stats --json     # for an agent to read and act on
 ```
 Reported usage
   alice (host)  online
-      RPEREZ · Opus 5 · quota 5h 42% 7d 12% · $1.24 · ctx 18%
+      RPEREZ · Opus 5 · $1.24 · quota spend 88% (→30d) · 5h 42% (→1h) · 7d 12% (→4d)
   carol  online
-      dev-box · Opus 5 · quota 5h 91% 7d 40% · $6.80
+      dev-box · Opus 5 · $6.80 · quota 5h 91% (→12m) · 7d 40% (→3d)
 ```
 
-> carol is at 91% of her 5-hour limit — give the next long task to alice.
+> carol is at 91% of her 5-hour window, but it resets in 12 minutes — worth
+> waiting. alice is at 88% of her *spend* cap, which does not reset for 30 days.
+
+**Every** window an agent has is carried, not a fixed two: five-hour, weekly, a
+separate weekly for the largest model, a spend cap, per-day or per-minute
+limits, or one collab has never heard of. Each keeps **its own** reset time,
+because "resets in 12 minutes" and "resets in 30 days" lead to opposite
+decisions. They are listed busiest-first, so the window that will actually stop
+someone is the one you read first.
 
 Figures ride along with ordinary messages, so they stay current without a
 separate heartbeat, and the host shares them onward so **everyone** sees them,
@@ -452,8 +491,12 @@ using, if either.
 
 Every field is optional — report what you have. The full schema is in
 [SPEC.md](SPEC.md#self-reported-usage); the short version is `model`,
-`cost_usd`, `quota_used_pct`, `quota_five_hour`, `quota_seven_day`,
-`context_pct`, `tokens_in`, `tokens_out`.
+`cost_usd`, `context_pct`, `tokens_in`, `tokens_out`, and `quotas`:
+
+```json
+{"quotas": {"five_hour":   {"used_pct": 42, "resets_at": "2026-09-01T14:00:00Z"},
+            "spend_limit": {"used_pct": 88}}}
+```
 
 **Quota always means percent used, never percent remaining.** Agents that report
 what is *left* are inverted on the way in — reading "42% left" as "42% burned"

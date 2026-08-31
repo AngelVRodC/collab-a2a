@@ -206,7 +206,26 @@ cancel   → TASK_STATE_CANCELED
 Claiming is the mechanism that stops two agents starting the same work: the
 second claim is refused with `409` naming the current owner.
 
-## 8. File transfer
+## 8. Session continuity
+
+A session is a durable thing: its id, its event log and its task board outlive
+any one process. A host may bring a previous session back rather than minting a
+new one, keeping the id, the event log and the task board.
+
+**Invites do not survive a resume.** Every invite issued in an earlier run is
+retired and a new one minted, so a link shared previously cannot silently admit
+someone later; re-sharing is an explicit act. Participant tokens *do* survive,
+so agents already admitted reconnect without ceremony — it is the open door
+that closes, not everyone already inside.
+
+Nothing on the wire changes. A resumed session is indistinguishable from one
+that was never stopped, which is the point: `Last-Event-ID` resume, history
+backfill and task state all behave exactly as they did before.
+
+A host who wants a genuinely clean guest list should start a new session rather
+than resuming.
+
+## 9. File transfer
 
 Artifacts and binaries move as files, not as pasted text.
 
@@ -222,7 +241,7 @@ A file addressed `to` someone is downloadable only by that person and the
 sender. Un-acked files are swept after 24 hours.
 
 
-## 9. Self-reported usage
+## 10. Self-reported usage
 
 Any participant may describe itself, so that work can be divided on evidence
 rather than guesswork — *give the long task to whoever has quota left*.
@@ -248,13 +267,41 @@ Every field is optional; report what you have.
 |---|---|---|
 | `model` | string | what is answering — `"Opus 5"`, `"gpt-5-codex"` |
 | `cost_usd` | number | spend so far this session |
-| `quota_used_pct` | number | percent of your allowance used, when there is one figure |
-| `quota_five_hour` | number | percent of a short rolling window used |
-| `quota_seven_day` | number | percent of a long rolling window used |
-| `quota_reset_at` | string | when the window rolls over |
+| `quotas` | map | **every** allowance window, each with its own reset (below) |
+| `quota_used_pct` | number | percent used, when an agent has only one figure |
+| `quota_five_hour` | number | *derived* from `quotas.five_hour`, kept for compatibility |
+| `quota_seven_day` | number | *derived* from `quotas.seven_day`, kept for compatibility |
 | `context_pct` | number | percent of the context window in use |
 | `tokens_in` / `tokens_out` | integer | tokens consumed / produced |
 | `lines_added` / `lines_removed` | integer | lines written |
+
+#### Quota windows
+
+Agents do not agree on which allowance windows they have, and the list keeps
+growing — a short rolling window, a weekly one, a separate weekly for the
+largest model, a spend cap, per-day and per-minute request limits. A fixed set
+of fields loses everything it did not anticipate, so `quotas` is a map:
+
+```jsonc
+"quotas": {
+  "five_hour":   {"used_pct": 42.3, "resets_at": "2026-09-01T14:00:00Z"},
+  "seven_day":   {"used_pct": 11.8, "resets_at": "2026-09-05T00:00:00Z"},
+  "spend_limit": {"used_pct": 88.0},
+  "requests_per_minute": {"used_pct": 5.0}
+}
+```
+
+Window names are normalised where recognised (`7d` and `weekly` both become
+`seven_day`) and otherwise kept as sent, so an agent can report a window collab
+has never heard of. At most 8 are carried; a roster line is not a dashboard.
+
+**Each window keeps its own `resets_at`.** A single shared reset time cannot say
+whether the thing rolling over in ten minutes is the five-hour window or the
+weekly one, and that is the difference between waiting and re-assigning.
+
+`quota_five_hour` and `quota_seven_day` are still accepted as input and still
+emitted, derived from the map, so anything using the older flat fields keeps
+working.
 
 **Quota is always percent *used*, never percent remaining.** Some agents report
 the opposite (Antigravity's status line gives `quota.remaining_fraction`);

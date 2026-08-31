@@ -132,3 +132,37 @@ def test_the_endpoint_normalises_like_every_other_path(client, session, host_hea
     client.post("/ext/collab/v1/stats", headers=_headers(bob),
                 json={"stats": {"quota_used_pct": 42.0}})
     assert _person(client, host_headers, "bob")["stats"]["quota_used_pct"] == 42.0
+
+
+def test_reporting_one_window_does_not_erase_the_others(client, session,
+                                                        host_headers):
+    """An agent that can only see one window right now must not lose the rest.
+
+    Merging the map wholesale meant a five-hour update wiped the weekly figure
+    and the spend cap reported a minute earlier.
+    """
+    bob = _join(client, session, "bob")
+    h = _headers(bob)
+    client.post("/ext/collab/v1/stats", headers=h, json={"stats": {"quotas": {
+        "five_hour": {"used_pct": 55, "resets_at": "SOON"},
+        "seven_day": {"used_pct": 20},
+    }}})
+    client.post("/ext/collab/v1/stats", headers=h, json={"stats": {"quotas": {
+        "spend_limit": {"used_pct": 91},
+    }}})
+
+    windows = _person(client, host_headers, "bob")["stats"]["quotas"]
+    assert set(windows) == {"five_hour", "seven_day", "spend_limit"}
+    assert windows["five_hour"]["resets_at"] == "SOON", "the reset survived too"
+    assert windows["spend_limit"]["used_pct"] == 91.0
+
+
+def test_a_window_update_refreshes_that_window(client, session, host_headers):
+    bob = _join(client, session, "bob")
+    h = _headers(bob)
+    client.post("/ext/collab/v1/stats", headers=h,
+                json={"stats": {"quotas": {"five_hour": {"used_pct": 10}}}})
+    client.post("/ext/collab/v1/stats", headers=h,
+                json={"stats": {"quotas": {"five_hour": {"used_pct": 90}}}})
+    windows = _person(client, host_headers, "bob")["stats"]["quotas"]
+    assert windows["five_hour"]["used_pct"] == 90.0

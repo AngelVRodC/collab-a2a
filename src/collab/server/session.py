@@ -98,6 +98,77 @@ def create_session(host_name: str, port: int, bind: str = "127.0.0.1",
     return cfg
 
 
+def hosted_sessions(home: Path | str | None = None) -> list[HubConfig]:
+    """Sessions this repo has hosted before, most recent first.
+
+    A session is a conversation and a task board, not just a connection. When
+    the same people pick the work up tomorrow they usually want yesterday's
+    history, not an empty room.
+    """
+    base = Path(home) if home else collab_home()
+    sessions = base / "sessions"
+    if not sessions.is_dir():
+        return []
+    found: list[tuple[float, HubConfig]] = []
+    for child in sessions.iterdir():
+        marker = child / "hub.json"
+        if not marker.is_file():
+            continue  # we joined this one; only a host can resume
+        cfg = HubConfig.load(child.name, base)
+        if cfg is None or not cfg.db_path.exists():
+            continue
+        found.append((marker.stat().st_mtime, cfg))
+    return [cfg for _, cfg in sorted(found, key=lambda pair: pair[0], reverse=True)]
+
+
+def session_summary(cfg: HubConfig) -> dict[str, int]:
+    """What resuming this session would bring back."""
+    from .store import Store
+
+    try:
+        store = Store(cfg.db_path)
+    except Exception:
+        return {}
+    try:
+        return {
+            "messages": store.max_seq(),
+            "tasks": len(store.tasks()),
+            "open_tasks": len(store.tasks(open_only=True)),
+            "participants": len(store.participants()),
+        }
+    finally:
+        store.close()
+
+
+def resume_session(cfg: HubConfig, port: int, bind: str = "127.0.0.1",
+                   domain: str = "") -> HubConfig:
+    """Bring a previous session back on a fresh port, with a new way in.
+
+    The **data** carries over — the session id, the event log, the task board —
+    because that is what people come back for. The **invite does not**: every
+    previously issued one is retired and a new one minted, so a link shared
+    days ago cannot quietly let someone back in. Re-sharing is a decision the
+    host makes each time.
+    """
+    cfg.port = port
+    cfg.bind = bind
+    if domain:
+        cfg.domain = domain
+    cfg.public_url = ""
+    cfg.tunnel = "none"
+
+    store = Store(cfg.db_path)
+    try:
+        store.clear_invites()
+        cfg.invite = new_secret()
+        store.add_invite(cfg.invite, ttl_seconds=24 * 3600, max_uses=0)
+    finally:
+        store.close()
+
+    cfg.save()
+    return cfg
+
+
 def join_line(cfg: HubConfig) -> str:
     """The single line a host hands to someone else."""
     base = cfg.public_url or cfg.local_url

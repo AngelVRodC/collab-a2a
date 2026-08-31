@@ -10,15 +10,31 @@ translated into it:
 
     model              str    what is answering, e.g. "Opus 5", "gpt-5"
     cost_usd           float  spend so far on this session
-    quota_used_pct     float  percent of your allowance used, if there is one number
-    quota_five_hour    float  percent of a short rolling window used
-    quota_seven_day    float  percent of a long rolling window used
-    quota_reset_at     str    when the window rolls over
+    quotas             map    every allowance window this agent has (see below)
+    quota_used_pct     float  percent used, when an agent has only one number
     context_pct        float  percent of the context window in use
     tokens_in          int    tokens consumed
     tokens_out         int    tokens produced
     lines_added        int    lines written
     lines_removed      int
+
+`quotas` is a map rather than a fixed set of fields, because agents do not
+agree on which windows they have and the list keeps growing — five-hour and
+weekly, a separate weekly for the largest model, a spend cap, per-day and
+per-minute request limits. Anything not listed here would simply be lost.
+
+    "quotas": {
+      "five_hour":   {"used_pct": 42.3, "resets_at": "2026-09-01T14:00:00Z"},
+      "seven_day":   {"used_pct": 11.8, "resets_at": "2026-09-05T00:00:00Z"},
+      "spend_limit": {"used_pct": 30.0}
+    }
+
+Each window keeps **its own** reset time. One shared reset field cannot say
+whether the thing rolling over in ten minutes is the five-hour window or the
+weekly one, and that is the difference between waiting and re-assigning.
+
+`quota_five_hour` and `quota_seven_day` are still accepted and still emitted,
+derived from the map, so anything reading the older flat fields keeps working.
 
 Quota is always **percent used**, never percent remaining. Some agents report
 the opposite — Antigravity's status line gives `quota.remaining_fraction` — and
@@ -53,6 +69,28 @@ CANONICAL: dict[str, type] = {
     "lines_added": int,
     "lines_removed": int,
 }
+
+#: Windows we give a tidy name and a stable order; anything else an agent
+#: reports is kept under the name it used rather than dropped.
+KNOWN_WINDOWS = {
+    "five_hour": "5h",
+    "hourly": "1h",
+    "daily": "24h",
+    "seven_day": "7d",
+    "weekly": "7d",
+    "seven_day_opus": "7d opus",
+    "monthly": "30d",
+    "spend_limit": "spend",
+    "credits": "credits",
+}
+WINDOW_ALIASES = {
+    "5h": "five_hour", "five_hourly": "five_hour",
+    "7d": "seven_day", "week": "seven_day", "weekly": "seven_day",
+    "opus_weekly": "seven_day_opus", "seven_day_opus_limit": "seven_day_opus",
+    "day": "daily", "month": "monthly", "spend": "spend_limit",
+}
+#: A roster line is not a dashboard.
+MAX_WINDOWS = 8
 
 #: Fields that arrive as "how much is left" and mean the opposite of ours.
 INVERTED = {
@@ -137,6 +175,60 @@ def _take(out: dict[str, Any], key: str, value: Any) -> None:
         out.setdefault(field, coerced)
 
 
+def _window_name(raw: str) -> str:
+    name = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+    return WINDOW_ALIASES.get(name, name)[:32]
+
+
+def _window_figures(value: Any) -> dict[str, Any]:
+    """Pull ``used_pct`` and ``resets_at`` out of one window's payload."""
+    out: dict[str, Any] = {}
+    if not isinstance(value, dict):
+        if (pct := _coerce("quota_used_pct", value)) is not None:
+            out["used_pct"] = pct
+        return out
+
+    for key, inner in value.items():
+        if isinstance(inner, (dict, list)):
+            continue
+        lowered = str(key).lower()
+        if lowered in INVERTED or "remaining" in lowered:
+            if (pct := _invert("quota_used_pct", inner)) is not None:
+                out.setdefault("used_pct", pct)
+        elif lowered in ("used_percentage", "used_pct", "used", "percent_used"):
+            if (pct := _coerce("quota_used_pct", inner)) is not None:
+                out.setdefault("used_pct", pct)
+        elif lowered in ("resets_at", "reset_time", "reset_at", "renews_at"):
+            text = str(inner).strip()[:MAX_STRING]
+            if text:
+                out.setdefault("resets_at", text)
+    return out
+
+
+def collect_quotas(data: Any) -> dict[str, dict[str, Any]]:
+    """Every allowance window an agent reported, each keeping its own reset."""
+    if not isinstance(data, dict):
+        return {}
+    windows: dict[str, dict[str, Any]] = {}
+    sources = [data.get("quotas")]
+    for key in ("rate_limits", "limits", "quota"):
+        sources.append(data.get(key))
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for raw_name, value in source.items():
+            lowered = str(raw_name).lower()
+            # A single-figure quota block, not a per-window map.
+            if lowered in INVERTED or lowered in (
+                    "used_percentage", "used_pct", "resets_at", "reset_time"):
+                continue
+            figures = _window_figures(value)
+            if figures and len(windows) < MAX_WINDOWS:
+                windows.setdefault(_window_name(raw_name), {}).update(figures)
+    return windows
+
+
 def normalise(data: Any) -> dict[str, Any]:
     """Turn whatever an agent produced into the canonical shape.
 
@@ -178,33 +270,36 @@ def normalise(data: Any) -> dict[str, Any]:
                 if not isinstance(value, (dict, list)):
                     _take(out, key, value)
 
-    # Rolling windows: {"rate_limits": {"five_hour": {"used_percentage": 42}}}
-    # and single-figure quota: {"quota": {"remaining_fraction": 0.58, ...}}
-    limits = data.get("rate_limits") or data.get("limits") or data.get("quota")
-    if isinstance(limits, dict):
-        for window, value in limits.items():
-            if window in INVERTED and not isinstance(value, dict):
-                _take(out, window, value)
+    # A single-figure quota block: {"quota": {"remaining_fraction": 0.58}}
+    for key in ("rate_limits", "limits", "quota"):
+        block = data.get(key)
+        if not isinstance(block, dict):
+            continue
+        for inner_key, inner in block.items():
+            if isinstance(inner, (dict, list)):
                 continue
-            field = ALIASES.get(window, "")
-            if field == "quota_reset_at" and not isinstance(value, dict):
-                _take(out, window, value)
-                continue
-            if field not in ("quota_five_hour", "quota_seven_day"):
-                continue
-            if isinstance(value, dict):
-                for inner_key, inner in value.items():
-                    if inner_key in INVERTED and (
-                            got := _invert(field, inner)) is not None:
-                        out.setdefault(field, got)
-                        break
-                    if inner_key in ("used_percentage", "used_pct"):
-                        if (coerced := _coerce(field, inner)) is not None:
-                            out.setdefault(field, coerced)
-                        break
-                continue
-            if value is not None and (coerced := _coerce(field, value)) is not None:
-                out.setdefault(field, coerced)
+            lowered = str(inner_key).lower()
+            if lowered in INVERTED:
+                _take(out, lowered, inner)
+            elif lowered in ("used_percentage", "used_pct"):
+                if (pct := _coerce("quota_used_pct", inner)) is not None:
+                    out.setdefault("quota_used_pct", pct)
+            elif lowered in ("resets_at", "reset_time"):
+                _take(out, lowered, inner)
+
+    # Every window, each with its own reset time.
+    if (windows := collect_quotas(data)):
+        out["quotas"] = windows
+        # Keep the older flat fields populated so anything reading them works.
+        for window, field in (("five_hour", "quota_five_hour"),
+                              ("seven_day", "quota_seven_day")):
+            pct = windows.get(window, {}).get("used_pct")
+            if pct is not None:
+                out.setdefault(field, pct)
+        if "quota_used_pct" not in out and len(windows) == 1:
+            only = next(iter(windows.values()))
+            if only.get("used_pct") is not None:
+                out.setdefault("quota_used_pct", only["used_pct"])
 
     return out
 
@@ -218,6 +313,23 @@ def sanitise(reported: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     extras = 0
     for key, value in (reported or {}).items():
+        if key == "quotas" and isinstance(value, dict):
+            # The one nested field we keep, capped and coerced.
+            windows: dict[str, dict[str, Any]] = {}
+            for name, figures in list(value.items())[:MAX_WINDOWS]:
+                if not isinstance(figures, dict):
+                    continue
+                kept: dict[str, Any] = {}
+                if (pct := _coerce("quota_used_pct",
+                                   figures.get("used_pct"))) is not None:
+                    kept["used_pct"] = pct
+                if figures.get("resets_at"):
+                    kept["resets_at"] = str(figures["resets_at"])[:MAX_STRING]
+                if kept:
+                    windows[_window_name(name)] = kept
+            if windows:
+                out["quotas"] = windows
+            continue
         if isinstance(value, (dict, list)):
             continue
         if key in CANONICAL:
@@ -233,3 +345,69 @@ def sanitise(reported: dict[str, Any]) -> dict[str, Any]:
             out[key[:MAX_STRING]] = value[:MAX_STRING]
             extras += 1
     return out
+
+
+def window_label(name: str) -> str:
+    """A short name for a window, falling back to whatever the agent called it.
+
+    Truncation drops the trailing partial word rather than cutting through it —
+    "requests per" reads as a mistake where "requests" reads as a name.
+    """
+    if name in KNOWN_WINDOWS:
+        return KNOWN_WINDOWS[name]
+    words = name.replace("_", " ").split()
+    label = ""
+    for word in words:
+        candidate = f"{label} {word}".strip()
+        if len(candidate) > 14:
+            break
+        label = candidate
+    return label or name[:14]
+
+
+def quota_summary(stats: dict[str, Any], *, with_resets: bool = False) -> str:
+    """Every allowance window on one line, busiest first.
+
+    Ordering by how much is used puts the window that will actually stop
+    someone first, which is the one you are looking for when handing out work.
+    """
+    windows = (stats or {}).get("quotas") or {}
+    parts: list[str] = []
+    if isinstance(windows, dict):
+        ranked = sorted(
+            ((name, figures) for name, figures in windows.items()
+             if isinstance(figures, dict) and figures.get("used_pct") is not None),
+            key=lambda pair: pair[1]["used_pct"], reverse=True,
+        )
+        for name, figures in ranked:
+            piece = f"{window_label(name)} {float(figures['used_pct']):.0f}%"
+            if with_resets and figures.get("resets_at"):
+                piece += f" (→{_short_reset(str(figures['resets_at']))})"
+            parts.append(piece)
+    if not parts and stats.get("quota_used_pct") is not None:
+        try:
+            parts.append(f"{float(stats['quota_used_pct']):.0f}%")
+        except (TypeError, ValueError):
+            return ""
+    return "quota " + " · ".join(parts) if parts else ""
+
+
+def _short_reset(value: str) -> str:
+    """A reset time worth reading at a glance."""
+    from datetime import datetime, timezone
+
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+        try:
+            when = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        delta = when - datetime.now(timezone.utc)
+        minutes = int(delta.total_seconds() // 60)
+        if minutes < 0:
+            return "due"
+        if minutes < 60:
+            return f"{minutes}m"
+        if minutes < 60 * 24:
+            return f"{minutes // 60}h"
+        return f"{minutes // (60 * 24)}d"
+    return value[:16]
