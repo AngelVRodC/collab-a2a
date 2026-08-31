@@ -308,13 +308,22 @@ def roster_rows(model: Model, width: int) -> list[Row]:
 
 
 class Tui:
-    def __init__(self, model: Model) -> None:
+    """The viewer.
+
+    ``view`` selects what this window shows: both panes, or just one of them.
+    A single-pane view is what makes the tmux layout possible — two windows,
+    each showing one half, with tmux doing the splitting so the user can resize
+    and move them with the keys they already know.
+    """
+
+    def __init__(self, model: Model, view: str = "both") -> None:
         self.model = model
+        self.view = view if view in ("both", "chat", "roster") else "both"
         # The roster reads from the top — following its tail would hide whoever
         # joined first, including yourself. Only the conversation tails.
         self.roster = Pane(follow=False)
         self.chat = Pane()
-        self.focus = "chat"
+        self.focus = "roster" if self.view == "roster" else "chat"
 
     # -- drawing ------------------------------------------------------------
 
@@ -332,8 +341,22 @@ class Tui:
     def draw(self, win) -> None:
         win.erase()
         height, width = win.getmaxyx()
-        if height < 8 or width < 30:
-            win.addnstr(0, 0, "window too small", width - 1)
+        if height < 4 or width < 24:
+            win.addnstr(0, 0, "window too small", max(width - 1, 1))
+            win.refresh()
+            return
+
+        if self.view != "both":
+            self._draw_single(win, height, width)
+            win.refresh()
+            return
+
+        if height < 8:
+            # Not enough room for two panes; show the conversation rather than
+            # squeezing both into something unreadable.
+            self.view, restore = "chat", True
+            self._draw_single(win, height, width)
+            self.view = "both" if restore else self.view
             win.refresh()
             return
 
@@ -421,6 +444,8 @@ class Tui:
 
     def handle(self, key: int) -> bool:
         """Returns False when the user asked to leave."""
+        if self.view != "both":
+            self.focus = "roster" if self.view == "roster" else "chat"
         pane = self.roster if self.focus == "roster" else self.chat
         # Deliberately not ESC: terminals send a bare ESC as the first byte of
         # every escape sequence — focus events, bracketed paste, cursor-position
@@ -443,6 +468,47 @@ class Tui:
             pane.to_end()
         return True
 
+    # -- single-pane views ---------------------------------------------------
+
+    def _draw_single(self, win, height: int, width: int) -> None:
+        """One half, filling the window. tmux owns the split in this mode."""
+        m = self.model
+        people = m.participants()
+        if self.view == "roster":
+            rows = roster_rows(m, width - 1)
+            pane, label = self.roster, f"PARTICIPANTS ({len(people)})"
+        else:
+            rows = []
+            for env in m.events:
+                rows.extend(event_rows(env, width - 1, m.profile.name))
+            pane, label = self.chat, "CONVERSATION"
+
+        state = str(m.status.get("state") or "?")
+        state_pair = {"live": C_ONLINE, "reconnecting": C_WARN}.get(state, C_OFFLINE)
+        head = f" {m.title()} · {label} "
+        win.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        win.hline(0, 0, " ", width)
+        win.addnstr(0, 0, head, max(width - 1, 0))
+        win.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
+        badge = f" {state} "
+        win.addnstr(0, max(width - len(badge) - 1, 0), badge, max(width - 1, 0),
+                    curses.color_pair(state_pair) | curses.A_BOLD)
+
+        pane.rows = height - 2
+        pane.total = len(rows)
+        pane.settle()
+        for i in range(pane.rows):
+            idx = pane.offset + i
+            if idx >= len(rows):
+                break
+            r = rows[idx]
+            win.addnstr(1 + i, 0, r.text, width - 1,
+                        curses.color_pair(r.pair) | r.attr)
+
+        hint = " ↑↓ pgup/pgdn: scroll · g/G: top/end · q: quit "
+        win.addnstr(height - 1, 0, hint[:width - 1], width - 1,
+                    curses.color_pair(C_DIM) | curses.A_DIM)
+
 
 def _init_colors() -> None:
     curses.start_color()
@@ -457,10 +523,10 @@ def _init_colors() -> None:
         curses.init_pair(C_SPEAKER_BASE + i, colour, -1)
 
 
-def run(profile: SessionProfile) -> int:
+def run(profile: SessionProfile, view: str = "both") -> int:
     model = Model(profile=profile)
     model.load_initial()
-    tui = Tui(model)
+    tui = Tui(model, view=view)
 
     def loop(win) -> int:
         _init_colors()

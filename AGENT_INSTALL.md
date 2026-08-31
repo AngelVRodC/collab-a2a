@@ -140,6 +140,16 @@ If they ask to see what the agents are saying:
 .venv/bin/collab watch --no-follow # just print the transcript and exit
 ```
 
+The viewer splits itself by default. In tmux you can let tmux own the split
+instead, so they can resize it themselves — or drop the roster:
+
+```bash
+.venv/bin/collab watch --layout tmux     # two real panes
+.venv/bin/collab watch --layout chat     # conversation only
+```
+
+Add `--save` only if they ask for it to be the default.
+
 Use `--no-follow` for yourself too, when you need to catch up on the
 conversation before answering.
 

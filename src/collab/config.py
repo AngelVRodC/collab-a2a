@@ -135,6 +135,48 @@ def set_share_stats(enabled: bool) -> bool:
     return bool(enabled)
 
 
+#: How `collab watch` arranges itself.
+#:
+#: ``split``  one window, roster above the conversation (works anywhere)
+#: ``tmux``   two real tmux panes, so tmux resizes and moves them for you
+#: ``chat``   conversation only
+#: ``roster`` roster only
+WATCH_LAYOUTS = ("split", "tmux", "chat", "roster")
+DEFAULT_WATCH_LAYOUT = "split"
+DEFAULT_ROSTER_SIZE = 30
+DEFAULT_ROSTER_POSITION = "top"
+
+
+def watch_settings() -> dict[str, Any]:
+    """The saved viewer preferences, with sane defaults filled in."""
+    cfg = load_config()
+    layout = str(cfg.get("watch_layout") or DEFAULT_WATCH_LAYOUT)
+    if layout not in WATCH_LAYOUTS:
+        layout = DEFAULT_WATCH_LAYOUT
+    try:
+        size = int(cfg.get("watch_roster_size") or DEFAULT_ROSTER_SIZE)
+    except (TypeError, ValueError):
+        size = DEFAULT_ROSTER_SIZE
+    position = str(cfg.get("watch_roster_position") or DEFAULT_ROSTER_POSITION)
+    if position not in ("top", "bottom", "left", "right"):
+        position = DEFAULT_ROSTER_POSITION
+    return {"layout": layout, "roster_size": max(5, min(size, 90)),
+            "roster_position": position}
+
+
+def save_watch_settings(*, layout: str | None = None, roster_size: int | None = None,
+                        roster_position: str | None = None) -> dict[str, Any]:
+    cfg = load_config()
+    if layout:
+        cfg["watch_layout"] = layout
+    if roster_size:
+        cfg["watch_roster_size"] = int(roster_size)
+    if roster_position:
+        cfg["watch_roster_position"] = roster_position
+    save_config(cfg)
+    return watch_settings()
+
+
 def set_default_name(name: str) -> str:
     cfg = load_config()
     cfg["display_name"] = _slug(name)

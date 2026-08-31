@@ -317,6 +317,29 @@ $ collab watch
 top or end, `q` quits. The conversation follows new messages until you scroll
 back, then holds still until you press `G`.
 
+### Layout
+
+In tmux you can let **tmux** own the split instead of the built-in one, which
+means you resize and move the panes with the keys you already know:
+
+```bash
+collab watch --layout tmux                    # roster and chat as two real panes
+collab watch --layout tmux --roster-position left --roster-size 40
+collab watch --layout chat                    # no roster at all
+collab watch --layout roster                  # just the roster
+collab watch --layout split                   # one window (the default)
+```
+
+Add `--save` to make any of it your default, so a bare `collab watch` uses it:
+
+```bash
+collab watch --layout tmux --roster-position left --roster-size 40 --save
+```
+
+It is kept in your global settings, alongside your display name and whether you
+share usage. `--layout tmux` outside tmux falls back to the built-in split
+rather than failing.
+
 Each speaker keeps the same colour throughout. `→` is someone arriving, `◆` a
 task, `▣` a file. Times are shown in **your** timezone; they travel in UTC so
 participants in different zones agree on ordering.

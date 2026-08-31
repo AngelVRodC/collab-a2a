@@ -29,8 +29,10 @@ from .config import (
     ensure_home,
     resolve_name,
     set_default_name,
+    save_watch_settings,
     set_share_stats,
     share_stats_enabled,
+    watch_settings,
 )
 from .client.context import gather as ctx_gather
 from .protocol import (DEFAULT_ROOM, MAX_FILE_BYTES, Envelope, KIND_CHAT,
@@ -564,6 +566,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     profile = _require_profile(args)
 
+    saved = watch_settings()
+    layout = args.layout or saved["layout"]
+    roster_size = args.roster_size or saved["roster_size"]
+    roster_position = args.roster_position or saved["roster_position"]
+
+    if args.save:
+        saved = save_watch_settings(layout=layout, roster_size=roster_size,
+                                    roster_position=roster_position)
+        ok(f"saved: layout {saved['layout']}, roster {saved['roster_size']}% "
+           f"{saved['roster_position']}")
+
     if args.tmux:
         argv = [str(Path(sys.argv[0]).resolve()), "watch",
                 "--session", profile.session_id]
@@ -587,11 +600,43 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return 0
 
     plain = args.plain or args.no_follow or not sys.stdout.isatty()
+
+    # Two real tmux panes rather than one window split internally: tmux then
+    # owns the geometry, so the user resizes and moves them with the keys they
+    # already know, or closes the roster entirely.
+    if layout == "tmux" and not plain and args.view == "both":
+        if not w.in_tmux():
+            warn("layout 'tmux' needs tmux; falling back to the built-in split")
+            layout = "split"
+        else:
+            argv = [str(Path(sys.argv[0]).resolve()), "watch",
+                    "--session", profile.session_id, "--view", "roster",
+                    "--layout", "roster"]
+            passthrough = {k: os.environ[k] for k in
+                           ("COLLAB_HOME", "COLLAB_CONFIG", "COLLAB_PEERS_DIR",
+                            "COLLAB_NAME", "NO_COLOR") if k in os.environ}
+            try:
+                where = w.open_tmux_pane(argv, env=passthrough, percent=roster_size,
+                                         position=roster_position)
+                ok(f"{where} for the roster — resize it with tmux as you like")
+            except RuntimeError as exc:
+                warn(f"{exc}; falling back to the built-in split")
+                layout = "split"
+            else:
+                args.view = "chat"
+
+    view = args.view
+    if layout == "chat":
+        view = "chat"
+    elif layout == "roster":
+        view = "roster"
+
     if not plain:
         from .client import tui
 
         try:
-            return tui.run(profile)
+            tui.ROSTER_SHARE = max(5, min(roster_size, 90)) / 100
+            return tui.run(profile, view=view)
         except KeyboardInterrupt:
             return 0
         except Exception as exc:
@@ -977,6 +1022,17 @@ def build_parser() -> argparse.ArgumentParser:
     wa.add_argument("--plain", action="store_true",
                     help="scrolling text instead of the full-screen view")
     wa.add_argument("--limit", type=int, default=200, help="how much history to show")
+    wa.add_argument("--layout", choices=["split", "tmux", "chat", "roster"],
+                    help="split: one window · tmux: two real panes · "
+                         "chat/roster: one of them only (default: your saved setting)")
+    wa.add_argument("--view", choices=["both", "chat", "roster"], default="both",
+                    help=argparse.SUPPRESS)  # used when tmux runs one pane per view
+    wa.add_argument("--roster-size", type=int, metavar="PCT",
+                    help="how much room the roster gets (default 30)")
+    wa.add_argument("--roster-position", choices=["top", "bottom", "left", "right"],
+                    help="where the roster pane goes in the tmux layout")
+    wa.add_argument("--save", action="store_true",
+                    help="remember these layout choices as your default")
     add_session_flag(wa)
     wa.set_defaults(func=cmd_watch)
 

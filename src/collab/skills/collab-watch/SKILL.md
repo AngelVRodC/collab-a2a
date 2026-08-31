@@ -29,6 +29,35 @@ The pane opens to the right at 35% and starts following immediately. Options:
 You stay in the original pane — the split runs detached, so your own session is
 not interrupted.
 
+## Letting tmux own the layout
+
+By default the viewer splits itself: roster on top, conversation below. In tmux
+you can hand that job to tmux instead, so the user resizes and rearranges with
+the keys they already know — or drops the roster entirely.
+
+```bash
+.venv/bin/collab watch --layout tmux     # roster and chat as two real panes
+.venv/bin/collab watch --layout chat     # conversation only
+.venv/bin/collab watch --layout roster   # roster only
+```
+
+Where the roster goes, and how much room it gets:
+
+```bash
+.venv/bin/collab watch --layout tmux --roster-position left --roster-size 40
+```
+
+If the user says they want this every time, add `--save` and it becomes their
+default — a bare `collab watch` then uses it:
+
+```bash
+.venv/bin/collab watch --layout tmux --roster-position left --save
+```
+
+Do not guess at this. `--layout tmux` needs tmux and falls back to the built-in
+split without it, so it is safe to offer, but only set a saved default when the
+user actually asks for one.
+
 ## If they are not in tmux
 
 Do **not** try to start tmux for them and take over their terminal. Tell them to

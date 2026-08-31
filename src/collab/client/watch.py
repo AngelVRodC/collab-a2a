@@ -169,8 +169,18 @@ def tmux_available() -> bool:
     return shutil.which("tmux") is not None
 
 
+#: Which way to split, and whether the new pane goes before the current one.
+POSITIONS = {
+    "top": ("-v", True),
+    "bottom": ("-v", False),
+    "left": ("-h", True),
+    "right": ("-h", False),
+}
+
+
 def open_tmux_pane(argv: list[str], *, env: dict[str, str] | None = None,
-                   percent: int = 35, horizontal: bool = True) -> str:
+                   percent: int = 35, horizontal: bool = True,
+                   position: str | None = None, focus: bool = False) -> str:
     """Split the current tmux window and run the viewer in the new pane.
 
     Returns a human-readable description of what happened.
@@ -188,12 +198,22 @@ def open_tmux_pane(argv: list[str], *, env: dict[str, str] | None = None,
     # Keep the pane open if it fails, so the reason stays on screen.
     command = f"{inner} || {{ echo; echo '[collab] the viewer exited'; read -r _; }}"
 
-    direction = "-h" if horizontal else "-v"
+    if position:
+        direction, before = POSITIONS.get(position, ("-v", True))
+    else:
+        direction, before = ("-h" if horizontal else "-v"), False
+
+    base = ["tmux", "split-window", direction]
+    if before:
+        base.append("-b")  # put the new pane above/left of this one
+    if not focus:
+        base.append("-d")  # stay where we are
+
     # tmux 3.4 dropped "-p N" ("size missing") in favour of "-l N%", which older
     # builds do not understand — so try the modern form first, then fall back.
     attempts = (
-        ["tmux", "split-window", direction, "-l", f"{percent}%", "-d", command],
-        ["tmux", "split-window", direction, "-p", str(percent), "-d", command],
+        [*base, "-l", f"{percent}%", command],
+        [*base, "-p", str(percent), command],
     )
     last: subprocess.CalledProcessError | None = None
     for candidate in attempts:
@@ -206,4 +226,5 @@ def open_tmux_pane(argv: list[str], *, env: dict[str, str] | None = None,
         detail = (last.stderr or "").strip() if last else "unknown error"
         raise RuntimeError(f"tmux refused to split the window: {detail}")
 
-    return f"opened a tmux pane ({percent}% {'right' if horizontal else 'below'})"
+    where = position or ("right" if horizontal else "below")
+    return f"opened a tmux pane ({percent}% {where})"
