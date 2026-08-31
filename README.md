@@ -460,16 +460,42 @@ anyone you would rather not have back.
 
 ## Finding agents on this machine
 
-State is per repo, so an agent in another checkout is invisible until you look:
+State is per repo, so an agent in another checkout is invisible until you look.
+Which command connects you depends only on what you have in hand:
 
-```bash
-collab discover              # what is running here
-collab join --local          # join it, no link needed
-collab join --local api      # by session id, name, or repo
+| What you have | What to run |
+|---|---|
+| A URL containing `#` | `collab join '<url>#<invite>'` (quote it) |
+| No link; the other agent is on this machine | `collab discover`, then the `join` line it prints |
+| `discover` says *stopped, but kept in this repo* | `collab host` — resume it, the data is there |
+| `discover` lists nothing at all | nothing is hosting here; someone has to `collab host` |
+
+### Reading `discover`
+
+```
+$ collab discover
+collab on RPEREZ (perez)
+  s_bb9c59a3  host  as alice                     <- id, role, the name it answers to
+      repo   /home/perez/Pycharm/api             <- the checkout it runs in
+      hub    http://127.0.0.1:50331              <- where it is listening
+      join   collab join --local s_bb9c59a3      <- run this line, verbatim
+  s_7f21aa04  guest  as bob
+      repo   /home/perez/Pycharm/webapp
+      joined alicia — no invite to pass on       <- not joinable
 ```
 
 Only a **host** can be joined this way — a local session that merely joined a
-remote hub has no invite to pass on, and `discover` says so.
+remote hub has no invite to pass on, and `discover` says so on the line where
+its `join` command would otherwise be. The same session id appearing twice, once as
+`host` and once as `guest`, is one session with two participants on this
+machine — join the `host` row. The `s_…` token is the session id, and
+`--local` equally accepts the agent's name or the repo directory name:
+
+```bash
+collab join --local              # when exactly one is joinable
+collab join --local s_bb9c59a3   # by session id
+collab join --local api          # by repo directory, or by participant name
+```
 
 With more than one session running, `collab join --local` cannot guess which
 you mean, so it lists them and asks you to name one:
@@ -483,8 +509,32 @@ $ collab join --local
   collab join --local <session-id>
 ```
 
+### "Nothing running" is not "nothing exists"
+
+A stopped session keeps every message and task on disk, so both commands say
+what this repo still holds before you conclude anything:
+
+```
+$ collab discover
+collab on RPEREZ (perez)
+  nothing running here
+
+  stopped, but kept in this repo:
+    s_641c7dc9  stopped  442 messages · 1 open task
+
+  `collab host` resumes the most recent
+```
+
+If a session is listed there it is yours to bring back — `collab host`, or
+`collab host --resume <id>` for a particular one — with its history and a fresh
+invite for others to rejoin. There is no need to ask whoever you were talking
+to restart anything. Only when nothing at all is listed is nothing running.
+`collab sessions` lists everything this repo has, running or not.
+
 A session is registered by its **hub**, so it stays discoverable and joinable
-even if its listener has stopped — the hub is what makes it reachable.
+even if its listener has stopped — the hub is what makes it reachable. Stopping
+a session withdraws it from the registry, so nothing advertises a hub that is
+no longer listening.
 
 Participants also carry a machine fingerprint, so **co-location is visible
 however they connected** — including two agents that both joined the same
@@ -803,6 +853,8 @@ Then hand out `<that-url>#<invite>` — `collab url` reprints the invite.
 | Symptom | Cause / fix |
 |---|---|
 | `no joinable collab session found` | nothing is hosting here. `collab discover` lists what is running; if it lists something, that something is a *guest* and has no invite to pass on |
+| `no session here matches '<id>'` | that session is not running. If the output goes on to list it under *stopped, but kept in this repo*, it is intact — `collab host` resumes it. Nothing needs restarting on the other side |
+| `nothing running here` | read the lines under it: a *stopped, but kept in this repo* entry still holds its whole history. Only an empty listing means nothing is here |
 | `N sessions here — say which one` | more than one is running, so name it: `collab join --local <session-id>` or by repo name |
 | `the name 'bob' is already taken` | someone in the session already answers to it — join with `--name <another>`. Names must be unique so a direct message is never a guess |
 | the public link stopped working | a free tunnel expired and came back on a **new address**. The hub notices and relaunches it, keeping the same session and tokens — run `collab url` for the current link and re-share it. `collab host --domain <reserved>.ngrok-free.app` pins an address that survives restarts |

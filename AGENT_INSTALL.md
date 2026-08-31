@@ -86,12 +86,46 @@ The user gives you a URL containing `#`.
 
 Quote it — the `#` is significant and unquoted shells drop it.
 
-**No link?** If the other agent is on this same machine, you do not need one:
+**No link?** If the other agent is on this same machine, you do not need one.
+Look first, then join what you saw:
 
 ```bash
 .venv/bin/collab discover            # what is running here
-.venv/bin/collab join --local        # join it
 ```
+
+```
+collab on RPEREZ (perez)
+  s_bb9c59a3  host  as alice                     <- id, role, the name it answers to
+      repo   /home/perez/Pycharm/api             <- the checkout it runs in
+      join   collab join --local s_bb9c59a3      <- run this line, verbatim
+  s_7f21aa04  guest  as bob
+      joined alicia — no invite to pass on       <- not joinable, ask that host for a link
+```
+
+Join an entry marked `host` — the printed `join` line is the exact command.
+`--local` takes the `s_…` id, the agent's name, or the repo directory name:
+
+```bash
+.venv/bin/collab join --local s_bb9c59a3 --focus "<what you are working on>"
+```
+
+If two are joinable, a bare `--local` lists them and asks which; name one.
+
+**If it says nothing is running, read the rest before concluding anything:**
+
+```
+  nothing running here
+
+  stopped, but kept in this repo:
+    s_641c7dc9  stopped  442 messages · 1 open task
+
+  `collab host` resumes the most recent
+```
+
+A stopped session still holds its whole history. When one is listed as kept in
+this repo, run `collab host` to bring it back — do not report the session lost
+or ask the other side to restart it. Only an empty listing means nothing is
+running here.
 
 If the join is refused with *the name is already taken*, someone in the session
 already answers to it. Pick another and say so:
@@ -105,23 +139,41 @@ separate step to start receiving.
 
 ## 4. Start receiving (do this immediately after step 3)
 
-**If you support a Monitor / background watch tool** — arm it once, persistent:
+Something must be reading the feed or you will miss what the other agent says
+while you work. Use the first of these your agent supports.
+
+**1. A watch/monitor tool** — arm it once, persistent:
 
 ```
 Monitor({command: ".venv/bin/collab listen --follow", persistent: true})
 ```
 
-The exact command and a WebSocket alternative are printed by step 3 and by
-`.venv/bin/collab status`.
-
-**Otherwise**, poll before you would otherwise go idle:
+**2. A background shell**, if you can start one and read its output later:
 
 ```bash
-.venv/bin/collab recv --wait 60
+.venv/bin/collab listen --follow > .collab/feed.log 2>&1 &
+tail -n 20 .collab/feed.log
 ```
 
-Returns as soon as anything arrives, empty on timeout. It does not block a turn
-for longer than the wait you give it.
+**3. A blocking wait**, if you have neither. Run it before you would otherwise
+go idle:
+
+```bash
+.venv/bin/collab recv --wait 60     # returns as soon as anything arrives
+.venv/bin/collab recv --limit 50     # everything unread, no waiting
+```
+
+It does not block a turn for longer than the wait you give it, and returns
+empty on timeout.
+
+**4. A WebSocket**, if you speak it: `.venv/bin/collab status --json` carries
+the `ws://127.0.0.1:<port>/events` URL. Step 3 prints it too.
+
+To read what was said before you started listening:
+
+```bash
+.venv/bin/collab watch --no-follow --limit 30
+```
 
 ## 5. Working
 

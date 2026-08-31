@@ -5,25 +5,52 @@ description: Show the human a live, readable transcript of the collab conversati
 
 # Showing the conversation to the user
 
-`collab listen` is built for agents — one terse line per event, so a Monitor can
-turn each into a notification. It is not what you give a person.
+`collab listen` is built for agents — one terse line per event, so whatever is
+watching the feed can turn each into a notification. It is not what you give a
+person.
 
 `collab watch` is the human view: the transcript so far, colourised per speaker,
 then live as it grows.
+
+**It is a full-screen terminal UI, so it belongs in the user's terminal, not in
+one of your tool calls.** Either open it in a tmux pane for them (below), or
+tell them the command to run. When *you* need to read the conversation, use the
+non-interactive form instead:
+
+```bash
+collab watch --no-follow --limit 30
+```
+
+
+## Running collab
+
+Examples here say `collab`. Use whichever of these resolves — check once, at
+the start, and use the same form throughout:
+
+```bash
+command -v collab || ls .venv/bin/collab
+```
+
+If `collab` is on `PATH`, use it as written. If only `.venv/bin/collab` exists,
+prefix every command with it. If neither, follow `AGENT_INSTALL.md` first.
+
+Run commands from **inside the repository** you are working in: state is per
+repo, in `<repo>/.collab/`, so the same command in a different directory talks
+about a different session — or none.
 
 ## If the user is in tmux — give them a pane
 
 Check `$TMUX`. If it is set, this puts the conversation beside their work:
 
 ```bash
-.venv/bin/collab watch --tmux
+collab watch --tmux
 ```
 
 The pane opens to the right at 35% and starts following immediately. Options:
 
 ```bash
-.venv/bin/collab watch --tmux --vertical      # split below instead
-.venv/bin/collab watch --tmux --percent 50    # give it half the window
+collab watch --tmux --vertical      # split below instead
+collab watch --tmux --percent 50    # give it half the window
 ```
 
 You stay in the original pane — the split runs detached, so your own session is
@@ -36,22 +63,22 @@ you can hand that job to tmux instead, so the user resizes and rearranges with
 the keys they already know — or drops the roster entirely.
 
 ```bash
-.venv/bin/collab watch --layout tmux     # roster and chat as two real panes
-.venv/bin/collab watch --layout chat     # conversation only
-.venv/bin/collab watch --layout roster   # roster only
+collab watch --layout tmux     # roster and chat as two real panes
+collab watch --layout chat     # conversation only
+collab watch --layout roster   # roster only
 ```
 
 Where the roster goes, and how much room it gets:
 
 ```bash
-.venv/bin/collab watch --layout tmux --roster-position left --roster-size 40
+collab watch --layout tmux --roster-position left --roster-size 40
 ```
 
 If the user says they want this every time, add `--save` and it becomes their
 default — a bare `collab watch` then uses it:
 
 ```bash
-.venv/bin/collab watch --layout tmux --roster-position left --save
+collab watch --layout tmux --roster-position left --save
 ```
 
 Do not guess at this. `--layout tmux` needs tmux and falls back to the built-in
@@ -64,13 +91,13 @@ Do **not** try to start tmux for them and take over their terminal. Tell them to
 run this in a second terminal:
 
 ```bash
-.venv/bin/collab watch
+collab watch
 ```
 
 Or, if they would like tmux to manage it:
 
 ```bash
-tmux new-session -s collab '.venv/bin/collab watch'
+tmux new-session -s collab 'collab watch'
 ```
 
 ## Just showing them the history inline
@@ -79,7 +106,7 @@ When they want to read what has happened rather than watch it, print it and
 exit rather than leaving a follower running:
 
 ```bash
-.venv/bin/collab watch --no-follow --limit 50
+collab watch --no-follow --limit 50
 ```
 
 That is also the right form when *you* need to catch up on the conversation

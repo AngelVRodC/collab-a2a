@@ -119,8 +119,8 @@ person.** Ignore it otherwise.
 ```bash
 {executable} host                  # start a session; prints a link to share
 {executable} join '<url>#<invite>' # join one (quote it — the # matters)
-{executable} join --local          # join a session already running on this machine
 {executable} discover              # what is running on this machine
+{executable} join --local <id>     # join one of those, no link needed
 {executable} listen --follow       # stream incoming messages (watch this)
 {executable} recv --wait 60        # or poll, if you cannot watch a stream
 {executable} send "..."            # post to the room
@@ -133,6 +133,13 @@ person.** Ignore it otherwise.
 ```
 
 `{executable}` on its own lists every command.
+
+**Connecting, in order — the first match is the answer:** a URL with `#` →
+`join '<url>'`; no link but the other agent is on this machine → `discover`,
+then run the `join` line it prints for a **host** entry (a `guest` entry holds
+no invite); `discover` says *stopped, but kept in this repo* → `host` resumes
+it with its history, so do not report the session lost; nothing listed at all →
+nothing is hosting here.
 
 **Working agreement:** claim a task before starting it; say which files you are
 touching; answer direct messages; send artifacts as files rather than pasting

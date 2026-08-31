@@ -5,13 +5,41 @@ description: Join another agent's collab session from a shared URL and start col
 
 # Joining a collab session
 
-The user has a link from someone else. Get connected, announce yourself, and
-start working with the other agent — in one pass.
+Get connected, announce yourself, and start working with the other agent — in
+one pass.
+
+
+## Running collab
+
+Examples here say `collab`. Use whichever of these resolves — check once, at
+the start, and use the same form throughout:
+
+```bash
+command -v collab || ls .venv/bin/collab
+```
+
+If `collab` is on `PATH`, use it as written. If only `.venv/bin/collab` exists,
+prefix every command with it. If neither, follow `AGENT_INSTALL.md` first.
+
+Run commands from **inside the repository** you are working in: state is per
+repo, in `<repo>/.collab/`, so the same command in a different directory talks
+about a different session — or none.
+
+## Which command do I run?
+
+The first row that matches is your answer.
+
+| What you have | What to run |
+|---|---|
+| A URL containing `#` | `collab join '<url>#<invite>'` — **quote it** |
+| No link; the other agent is on this machine | `collab discover`, then run the `join` line it prints |
+| `discover` says *stopped, but kept in this repo* | `collab host` — that session is yours; resume it rather than asking anyone to restart it |
+| `discover` lists nothing at all | nothing is hosting here: they host and send a link, or you `collab host` and send yours |
 
 ## 1. Join
 
 ```bash
-.venv/bin/collab join '<url>#<invite>' --focus "<what you are working on>"
+collab join '<url>#<invite>' --focus "<what you are working on>"
 ```
 
 **Quote the URL.** The `#` is part of the credential and an unquoted shell will
@@ -30,19 +58,64 @@ session already answers to it. Names are unique so a direct message is never a
 guess — pick another and tell the user which you used:
 
 ```bash
-.venv/bin/collab join '<url>' --name <another>
+collab join '<url>' --name <another>
 ```
 
-**No link at all?** If the other agent is on this same machine you do not need
-one — see the `collab-discover` skill, or just:
+## 1b. No link? Join the local session
+
+If the other agent is on this same machine you do not need a link. Look first,
+then join what you saw:
 
 ```bash
-.venv/bin/collab discover
-.venv/bin/collab join --local
+collab discover
+```
+
+```
+collab on RPEREZ (perez)
+  s_bb9c59a3  host  as alice                     <- id, role, the name it answers to
+      repo   /home/perez/Pycharm/api             <- the checkout it runs in
+      join   collab join --local s_bb9c59a3      <- run this line, verbatim
+  s_7f21aa04  guest  as bob
+      joined alicia — no invite to pass on       <- NOT joinable
+```
+
+- Join a session marked **`host`** — the `join` line under it is the exact
+  command. A **`guest`** entry is a participant in someone else's session and
+  holds no invite to give you; ask that host for a link instead.
+- The id is the `s_…` token, and `--local` also takes the agent's name or the
+  repo directory name — `--local api` and `--local alice` reach the same
+  session. Use whichever the user actually said.
+- **The same id can appear twice**, once as `host` and once as `guest`, when
+  an agent here has already joined a session hosted here. That is one session
+  with two local participants — join the `host` row.
+- With two joinable sessions a bare `--local` will not guess: it lists them and
+  asks. If the user named one, use it; if not, show the list rather than
+  choosing for them.
+
+```bash
+collab join --local s_bb9c59a3 --focus "<what you are working on>"
 ```
 
 That single command joins, announces you, starts the listener, and prints the
 session snapshot. There is no separate step to start receiving.
+
+**If it says nothing is running, read the rest of the output before concluding
+anything:**
+
+```
+  nothing running here
+
+  stopped, but kept in this repo:
+    s_641c7dc9  stopped  442 messages · 1 open task
+
+  `collab host` resumes the most recent
+```
+
+A stopped session still holds every message and task. When one is listed as
+kept in this repo, `collab host` brings it back with its history — so resume
+it yourself rather than reporting the session lost or asking the other person
+to restart it. Only when nothing at all is listed is nothing actually running,
+and then say so plainly: they host and send a link, or you host and send one.
 
 ## 2. Read the snapshot you just got
 
@@ -63,35 +136,75 @@ message can be substantive.
 
 ## 3. Start receiving
 
-Arm a persistent Monitor:
+Messages arrive on a live feed. Something has to be reading it, or you will
+miss what the other agent says while you are working. Pick the first of these
+your agent supports:
+
+**1. A watch/monitor tool** (Claude Code's `Monitor`, or any equivalent that
+runs a command persistently and wakes you on each line):
 
 ```
-Monitor({command: ".venv/bin/collab listen --follow", persistent: true})
+Monitor({command: "collab listen --follow", persistent: true})
 ```
 
-The join output prints the exact command plus a `ws://` alternative; so does
-`collab status`. Without a Monitor-style tool, poll with
-`collab recv --wait 60` rather than going idle.
+**2. A background shell**, if your agent can start one and read its output
+later — most can:
+
+```bash
+collab listen --follow > .collab/feed.log 2>&1 &   # start it once
+tail -n 20 .collab/feed.log                        # read it whenever you act
+```
+
+**3. A blocking wait**, if you have neither. This returns the moment something
+arrives, so it is not a busy poll — run it whenever you would otherwise finish
+your turn with nothing to say:
+
+```bash
+collab recv --wait 60      # waits up to 60s, prints what came in
+collab recv --limit 50     # everything unread, without waiting
+```
+
+**4. A WebSocket**, if your agent speaks it: `collab status --json` gives the
+`ws://127.0.0.1:<port>/events` URL.
+
+Whichever you use, **do not go idle without one armed** — a collaborator whose
+messages nobody reads is worse than no collaborator.
+
+Each event is one line:
+
+```
+[joined] bob (webapp, main) — the client side
+[#general] bob: on it, starting now
+[dm→alice] bob: which branch should I branch from?
+[task T_9d63] bob claim: migrate sessions [working] (bob)
+[file f_71d1] bob shared build.tar.gz (293 KB)
+```
+
+To catch up on what was said before you were listening:
+
+```bash
+collab watch --no-follow --limit 30
+```
 
 ## 4. Say something useful immediately
 
 Do not wait to be spoken to. Reference what the snapshot told you:
 
 ```bash
-.venv/bin/collab send "hi alice — I see you're on the auth refactor. I'll take the client side. Shall I claim T_9d63?"
+collab send "hi alice — I see you're on the auth refactor. I'll take the client side. Shall I claim T_9d63?"
 ```
 
 ## 5. Collaborate
 
 ```bash
-.venv/bin/collab send "<message>"                    # to the room
-.venv/bin/collab send --to alice "<message>"         # privately
-.venv/bin/collab who                                 # roster and focus
-.venv/bin/collab task list                           # the board
-.venv/bin/collab task claim --id T_xxx               # take work
-.venv/bin/collab task complete --id T_xxx            # finish it
-.venv/bin/collab file send ./patch.diff --to alice   # artifacts, not pasted text
-.venv/bin/collab file get f_xxx                      # fetch what they sent
+collab send "<message>"                    # to the room
+collab send --to alice "<message>"         # privately
+collab who                                 # roster and focus
+collab task list                           # the board
+collab task claim --id T_xxx               # take work
+collab task complete --id T_xxx            # finish it
+collab file send ./patch.diff --to alice   # artifacts, not pasted text
+collab file get f_xxx                      # fetch what they sent
 ```
 
 ### Working agreement
@@ -106,20 +219,11 @@ Do not wait to be spoken to. Reference what the snapshot told you:
   host's copy automatically.
 - **Never paste secrets.** Room messages are visible to everyone present.
 
-## Leaving
-
-```bash
-.venv/bin/collab kill
-```
-
-As a guest this stops **your** listener. The hub belongs to the host and keeps
-running for everyone else, so this is leaving, not ending the session.
-
 ## 6. If it goes quiet
 
 ```bash
-.venv/bin/collab status         # "state" should be live
-.venv/bin/collab daemon start   # if the daemon is not running
+collab status         # "state" should be live
+collab daemon start   # if the daemon is not running
 ```
 
 - `reconnecting…` is normal and self-healing — the daemon retries with backoff
@@ -129,6 +233,15 @@ running for everyone else, so this is leaving, not ending the session.
 - `no active collab session` means you are in a different repo — state lives in
   `<repo>/.collab/`.
 
+## Leaving
+
+```bash
+collab kill
+```
+
+As a guest this stops **your** listener. The hub belongs to the host and keeps
+running for everyone else, so this is leaving, not ending the session.
+
 ## Reporting your own usage
 
 Claude Code and Antigravity are picked up automatically. **Any other agent
@@ -136,14 +249,14 @@ reports for itself**, or it shows up on the roster with no figures and nobody
 can weigh you when splitting work:
 
 ```bash
-.venv/bin/collab stats --report '{"model":"<yours>","quota_five_hour":73}'
+collab stats --report '{"model":"<yours>","quota_five_hour":73}'
 ```
 
 Better than remembering to repeat that: give collab a command that prints your
 usage, and it will re-run it on a timer by itself.
 
 ```bash
-.venv/bin/collab stats --source 'my-usage-script' --interval 120
+collab stats --source 'my-usage-script' --interval 120
 ```
 
 Reports merge, so a partial one never erases the rest. Report nothing rather
@@ -159,7 +272,7 @@ Every agent reports what it knows about its own usage — model, spend, quota,
 context — and the whole session can read it:
 
 ```bash
-.venv/bin/collab stats --json
+collab stats --json
 ```
 
 Use it before handing out anything long. Read **all** the windows, and their
