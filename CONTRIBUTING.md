@@ -1,0 +1,121 @@
+# Contributing
+
+Thanks for taking a look. This is a small project with a sharp purpose: let
+coding agents on different machines talk to each other over A2A without either
+of them needing to be reachable from the internet.
+
+## Getting set up
+
+```bash
+git clone https://github.com/rperez93/collab-a2a.git
+cd collab-a2a
+./install.sh
+.venv/bin/python -m pytest -q
+```
+
+Everything runs from `.venv`. Nothing is installed globally, and `install.sh`
+will never use `sudo` or touch system packages — if it cannot find a Python
+≥3.10 it stops and tells you what to install.
+
+## Running it against yourself
+
+You do not need two machines. `COLLAB_HOME` overrides where session state
+lives, so one repo can hold two independent profiles:
+
+```bash
+COLLAB_HOME=/tmp/A .venv/bin/collab host --no-tunnel --name alice
+COLLAB_HOME=/tmp/B .venv/bin/collab join 'http://127.0.0.1:PORT#INVITE' --name bob
+COLLAB_HOME=/tmp/A .venv/bin/collab send "does this work?"
+COLLAB_HOME=/tmp/B .venv/bin/collab watch --no-follow
+```
+
+`--no-tunnel` keeps ngrok out of the loop while you are iterating.
+
+## Layout
+
+```
+src/collab/
+  protocol.py      the envelope and the extension's shared constants
+  config.py        per-repo .collab/ resolution, names, session profiles
+  cli.py           every command
+  server/
+    app.py         the FastAPI app: A2A routes + the extension
+    hub.py         fan-out — one queue per connected participant
+    store.py       SQLite; the append-only event log is the backbone
+    events.py      the SSE feed and Last-Event-ID resume
+    executor.py    bridges A2A SendMessage into the hub
+    auth.py        invites, per-participant tokens, the bearer backend
+    card.py        the Agent Card
+    tunnel.py      ngrok detection
+  client/
+    daemon.py      holds the feed, reconnects, writes the local inbox
+    onboard.py     the one-step join
+    watch.py       the human-readable transcript
+    bridge.py      localhost WebSocket bridge for Monitor
+  statusline/      render + the additive installers
+```
+
+## Things worth knowing before you change something
+
+**The event log is the contract.** `seq` is assigned on append, is monotonic,
+and doubles as the SSE `id:`. Persist *before* fan-out — if you deliver an event
+that is not yet durable, a reconnecting client can resume past a message that no
+longer exists. Most of the resume tests exist to catch exactly that.
+
+**`from` is never client-supplied.** The hub sets it from the authenticated
+participant. Anything that lets a client choose its own sender is a security
+bug, not a feature.
+
+**Direct messages must be filtered on replay too**, not just on live delivery.
+It is easy to add a new read path and forget; `test_replayed_dms_stay_private`
+guards it.
+
+**The status line must never touch the network.** Hosts cancel an in-flight
+status line script when the next update fires, so a network call there can stall
+someone's whole status bar. It reads one local file and exits 0 — including when
+collab is not running at all.
+
+**The status line installers are additive, always.** A status line script is
+shared ground; a typical one already hosts several other tools' segments. Insert
+a marker block, keep every other byte, back up first, and make `uninstall`
+restore the file exactly. There is a regression test built from a real machine's
+script with three other tools in it — do not weaken it.
+
+**A2A details that are easy to get wrong** (all verified against the installed
+SDK, not the docs):
+
+- JSON-RPC method names in 1.0 are gRPC-style — `SendMessage`,
+  `SubscribeToTask` — *not* `message/send`. Those are the 0.3 names, which we
+  also accept via `enable_v0_3_compat`.
+- `A2A-Version: 1.0` must be sent, or a request is read as 0.3.
+- Types are protobuf (`a2a.types.a2a_pb2`), not pydantic. `protocol_version`
+  lives on `AgentInterface`, not on `AgentCard`.
+- `EventQueue.enqueue_event` is a coroutine — awaiting it is not optional; a
+  missing `await` hangs the request instead of failing.
+- The SDK's REST binding mounts a greedy `/{tenant}` at the root, so our routes
+  are registered *before* it.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Streaming tests run against a real uvicorn server rather than Starlette's
+`TestClient`, which does not behave with SSE. If you are adding behaviour to the
+feed, follow that pattern — it is the honest test.
+
+Please add a test that fails before your change and passes after. A bug fix
+without a test tends to come back.
+
+## Style
+
+Match what is there: type hints, `from __future__ import annotations`, and
+comments that explain *why* rather than restating the code. The existing
+comments are a reasonable guide to the level of explanation that earns its
+place.
+
+## Reporting a security issue
+
+Please do not open a public issue for anything involving tokens, authentication,
+or access control. Open a private security advisory on the repository instead.

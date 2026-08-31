@@ -36,6 +36,10 @@ BACKOFF_CAP = 30.0
 #: the connection is dead rather than quiet.
 READ_TIMEOUT = 45.0
 STATUS_HEARTBEAT = 3.0
+#: A participant's `hello` is published while they join, which is *before*
+#: their own feed subscribes — so a roster read triggered by that event still
+#: shows them offline. Re-read it on a timer as well as on events.
+SNAPSHOT_REFRESH = 9.0
 
 
 @dataclass
@@ -107,6 +111,7 @@ class Daemon:
         self.last_event_at = time.time()
         self.connected_since: float | None = None
         self.snapshot: dict[str, Any] = {}
+        self._http: httpx.AsyncClient | None = None
         self._stop = asyncio.Event()
 
     # --- status ---------------------------------------------------------------
@@ -135,7 +140,12 @@ class Daemon:
         tmp.replace(self.paths.status)  # atomic: a reader never sees a half file
 
     async def _heartbeat_loop(self) -> None:
+        last_refresh = 0.0
         while not self._stop.is_set():
+            if (time.time() - last_refresh) > SNAPSHOT_REFRESH and self.state == "live":
+                if self._http is not None:
+                    await self._refresh_snapshot(self._http)
+                last_refresh = time.time()
             self.write_status()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=STATUS_HEARTBEAT)
@@ -184,6 +194,7 @@ class Daemon:
     async def _connect_forever(self) -> None:
         backoff = BACKOFF_START
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=READ_TIMEOUT)) as client:
+            self._http = client
             while not self._stop.is_set():
                 try:
                     await self._refresh_snapshot(client)

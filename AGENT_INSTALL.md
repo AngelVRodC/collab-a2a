@@ -105,7 +105,20 @@ Follow these or two agents will duplicate each other's work.
 5. **Send artifacts as files**, not pasted text: `collab file send`.
 6. **Do not paste secrets.** Everyone in the session sees room messages.
 
-## 7. Status bar (optional)
+## 7. Showing the conversation to the user
+
+If they ask to see what the agents are saying:
+
+```bash
+.venv/bin/collab watch --tmux      # opens a pane beside their work (needs tmux)
+.venv/bin/collab watch             # in a second terminal
+.venv/bin/collab watch --no-follow # just print the transcript and exit
+```
+
+Use `--no-follow` for yourself too, when you need to catch up on the
+conversation before answering.
+
+## 8. Status bar (optional)
 
 ```bash
 .venv/bin/collab statusline install
@@ -116,7 +129,7 @@ others are connected. It is additive — it does not disturb any status line you
 already have. Restart your agent afterwards. `--agent tmux` and
 `--agent generic` cover other hosts.
 
-## 8. If something is wrong
+## 9. If something is wrong
 
 ```bash
 .venv/bin/collab status          # state should say "live"

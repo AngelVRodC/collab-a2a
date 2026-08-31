@@ -1,5 +1,21 @@
 # collab
 
+<p align="center">
+  <img src="assets/logo.svg" alt="collab logo" width="180">
+</p>
+
+<p align="center">
+  <!-- Product Hunt badge goes here once we launch:
+  <a href="https://www.producthunt.com/products/collab-a2a?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge" target="_blank" rel="noopener noreferrer"><img alt="collab - Let your coding agents talk to each other | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=REPLACE&amp;theme=neutral"></a>
+  <br>
+  -->
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg">
+  <img alt="A2A Protocol 1.0" src="https://img.shields.io/badge/A2A%20protocol-1.0-0ea5e9.svg">
+  <br>
+  <a href="https://buymeacoffee.com/rperez93" target="_blank" rel="noopener noreferrer"><img alt="Buy Me A Coffee" src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-ffdd00?logo=buymeacoffee&logoColor=black"></a>
+</p>
+
 **Let coding agents talk to each other.**
 
 Two people, two laptops, two coding agents. Today they align by a human copying
@@ -43,10 +59,10 @@ From that moment both agents receive each other's messages as they happen.
 
 - [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start)
 - [Making an agent listen](#making-an-agent-listen) · [Commands](#commands)
-- [Status line](#status-line) · [Files](#sharing-files-and-artifacts)
+- [Watching the conversation](#watching-the-conversation) · [Status line](#status-line) · [Files](#sharing-files-and-artifacts)
 - [Security](#security) · [Where state lives](#where-state-lives)
 - [Sharing without ngrok](#sharing-without-ngrok) · [Troubleshooting](#troubleshooting)
-- [Protocol](SPEC.md) · [For agents](AGENT_INSTALL.md)
+- [Protocol](SPEC.md) · [For agents](AGENT_INSTALL.md) · [Contributing](CONTRIBUTING.md)
 
 ---
 
@@ -177,6 +193,7 @@ Each event is one line:
 | `collab send <text>` | post to a room, `--to NAME` for a direct message |
 | `collab listen --follow` | stream events as lines (what a Monitor watches) |
 | `collab recv --wait N` | drain unread, optionally waiting |
+| `collab watch` | a readable live transcript, for a human to follow |
 | `collab who` | roster: who is here, their repo, branch and focus |
 | `collab rooms [--create X]` | list or create rooms |
 | `collab task propose\|claim\|update\|complete\|list` | the shared task board |
@@ -187,6 +204,38 @@ Each event is one line:
 | `collab name [value]` | show or set your global display name |
 | `collab daemon start\|stop\|status` | manage the listener |
 | `collab statusline install` | add the status bar segment |
+
+## Watching the conversation
+
+`collab listen` is built for agents — one terse line per event, so a Monitor can
+turn each into a notification. `collab watch` is the view for a **person**: the
+transcript so far, colourised per speaker, then live as it grows.
+
+```
+$ collab watch
+┌ collab · s_bb9c59a3 · you are alice · host alice ──────────────────────┐
+19:41            bob → joined from webapp, main — working on the client side
+19:41    alice (you)   #general  can you take the client side of the auth refactor?
+19:42            bob   #general  on it, starting now
+19:42            bob ◆ claim T_9d63 "migrate sessions" [working] · bob
+19:44    alice (you) ▣ shared build.tar.gz (293 KB) · collab file get f_71d1
+19:45            bob ▣ collected build.tar.gz (deleted from host)
+```
+
+Each speaker keeps the same colour throughout. `→` is someone arriving, `◆` a
+task, `▣` a file.
+
+**In tmux**, give it its own pane and keep working beside it:
+
+```bash
+collab watch --tmux                  # 35% to the right
+collab watch --tmux --vertical       # split below
+collab watch --tmux --percent 50
+```
+
+The pane runs detached, so your own shell is not interrupted. Outside tmux, run
+`collab watch` in a second terminal. Add `--no-follow` to print the history and
+exit — useful for catching up.
 
 ## Status line
 
@@ -320,7 +369,12 @@ Then hand out `<that-url>#<invite>` — `collab url` reprints the invite.
 | ngrok not detected | it must be on `PATH`; a free ngrok account also needs `ngrok config add-authtoken` |
 | `A2A version '0.3' is not supported` | send `A2A-Version: 1.0` (collab's own client does) |
 
-## Development
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) — it covers the layout, how to run two
+agents against yourself on one machine, and the invariants worth knowing before
+changing anything (the event log, DM filtering on replay, and why the status
+line must never touch the network).
 
 ```bash
 ./install.sh

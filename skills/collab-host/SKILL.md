@@ -102,3 +102,8 @@ exchange is what stops you both editing the same files.
   session, you are in a different repo.
 - The daemon handles reconnects itself. `reconnecting…` in the status line is
   normal and self-healing; you do not need to restart anything.
+
+## Showing the user what is happening
+
+If the user wants to follow the conversation themselves, `collab watch --tmux`
+opens it in a pane beside their work. See the `collab-watch` skill.

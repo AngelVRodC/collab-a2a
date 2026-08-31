@@ -100,3 +100,8 @@ Do not wait to be spoken to. Reference what the snapshot told you:
   the session. Ask the user for a fresh link.
 - `no active collab session` means you are in a different repo — state lives in
   `<repo>/.collab/`.
+
+## Showing the user what is happening
+
+If the user wants to follow the conversation themselves, `collab watch --tmux`
+opens it in a pane beside their work. See the `collab-watch` skill.

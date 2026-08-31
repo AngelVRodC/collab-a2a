@@ -386,6 +386,41 @@ def cmd_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """A readable live transcript, for a person to leave open in a pane."""
+    from .client import watch as w
+
+    profile = _require_profile(args)
+
+    if args.tmux:
+        argv = [str(Path(sys.argv[0]).resolve()), "watch",
+                "--session", profile.session_id]
+        passthrough = {k: os.environ[k] for k in ("COLLAB_HOME", "COLLAB_CONFIG",
+                                                  "COLLAB_NAME", "NO_COLOR")
+                       if k in os.environ}
+        try:
+            where = w.open_tmux_pane(argv, env=passthrough, percent=args.percent,
+                                     horizontal=not args.vertical)
+        except RuntimeError as exc:
+            fail(str(exc))
+            if not w.tmux_available():
+                print(dim("  install tmux, or just run `collab watch` in a second terminal"))
+            elif not w.in_tmux():
+                print(dim("  start tmux first, then re-run this inside it:"))
+                joined = " ".join(argv)
+                print(dim(f"    tmux new-session -s collab '{joined}'"))
+            return 1
+        ok(where)
+        print(dim("  the conversation will appear there as it happens"))
+        return 0
+
+    try:
+        return w.watch(profile, follow=not args.no_follow, limit=args.limit)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
 def cmd_file(args: argparse.Namespace) -> int:
     profile = _require_profile(args)
     try:
@@ -660,6 +695,18 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--json", action="store_true")
     add_session_flag(t)
     t.set_defaults(func=cmd_task)
+
+    wa = sub.add_parser("watch", help="a readable live transcript of the conversation")
+    wa.add_argument("--tmux", action="store_true",
+                    help="open it in a new tmux pane instead of here")
+    wa.add_argument("--vertical", action="store_true",
+                    help="with --tmux, split below instead of to the right")
+    wa.add_argument("--percent", type=int, default=35,
+                    help="with --tmux, how much of the window to give the pane")
+    wa.add_argument("--no-follow", action="store_true", help="print and exit")
+    wa.add_argument("--limit", type=int, default=200, help="how much history to show")
+    add_session_flag(wa)
+    wa.set_defaults(func=cmd_watch)
 
     f = sub.add_parser("file", help="share files and artifacts without pasting them as text")
     f.add_argument("action", choices=["send", "get", "list", "rm"])
