@@ -79,9 +79,20 @@ class Inbox:
             row = self._db.execute("SELECT value FROM meta WHERE key='last_seq'").fetchone()
         return int(row["value"]) if row else 0
 
-    def unread_count(self) -> int:
+    def unread_count(self, *, exclude_sender: str | None = None) -> int:
+        """How many messages are waiting for you.
+
+        Your own messages come back down the feed (that is what keeps every
+        participant's log identical), but counting them as unread would show a
+        badge for talking to yourself.
+        """
+        sql = "SELECT COUNT(*) AS c FROM inbox WHERE read=0"
+        args: tuple[Any, ...] = ()
+        if exclude_sender:
+            sql += " AND sender <> ?"
+            args = (exclude_sender,)
         with self._lock:
-            row = self._db.execute("SELECT COUNT(*) AS c FROM inbox WHERE read=0").fetchone()
+            row = self._db.execute(sql, args).fetchone()
         return int(row["c"])
 
     def take_unread(self, limit: int = 100, *, mark: bool = True) -> list[Envelope]:

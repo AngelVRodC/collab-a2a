@@ -130,7 +130,7 @@ class Daemon:
             "bridge_port": self.bridge.port,
             "others_connected": sum(1 for p in others if p.get("connected")),
             "others_total": len(others),
-            "unread": self.inbox.unread_count(),
+            "unread": self.inbox.unread_count(exclude_sender=self.profile.name),
             "last_seq": self.inbox.last_seq(),
             "heartbeat": time.time(),
             "connected_since": self.connected_since,

@@ -85,9 +85,8 @@ def build_block(executable: str, *, separator: bool) -> str:
 def _has_other_segments(body: str) -> bool:
     """Does anything besides scaffolding actually print here?
 
-    Decides whether our block emits a trailing separator.  Getting this wrong
-    leaves a dangling " · " when collab is the only segment, so the shebang,
-    the shared stdin capture, comments and blank lines all have to be ignored.
+    The shebang, the shared stdin capture, comments and blank lines are not
+    output, so none of them count.
     """
     stripped = BLOCK_RE.sub("", body)
     for raw in stripped.splitlines():
@@ -171,8 +170,11 @@ def install_claude_code(scope: str = "global", *, executable: str | None = None)
         if (b := _backup(script)) is not None:
             backups.append(b)
 
-        has_other_content = _has_other_segments(body)
-        block = build_block(exe, separator=has_other_content)
+        # No trailing separator when other vendors' blocks follow: the
+        # convention in these scripts is that each block prefixes its own
+        # separator (local-tts uses ' · ', claude-statusline a newline), so
+        # appending one here leaves a dangling ' · ' at the end of the line.
+        block = build_block(exe, separator=False)
         script.write_text(_insert_at_top(body, block))
         _make_executable(script)
         notes.append(f"kept every existing segment in {script}")

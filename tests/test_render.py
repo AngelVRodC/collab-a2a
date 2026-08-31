@@ -79,3 +79,16 @@ def test_json_output_is_machine_readable(monkeypatch, capsys):
     monkeypatch.setattr(r, "status_payload", lambda cwd: {"active": True, "state": "live"})
     r.main(["--json"])
     assert json.loads(capsys.readouterr().out)["state"] == "live"
+
+
+def test_your_own_messages_are_not_unread(tmp_path):
+    """Own messages come back down the feed; a badge for them would be wrong."""
+    from collab.client.inbox import Inbox
+    from collab.protocol import Envelope
+
+    inbox = Inbox(tmp_path)
+    inbox.record(Envelope(kind="chat", text="mine", sender="bob", seq=1))
+    inbox.record(Envelope(kind="chat", text="theirs", sender="alice", seq=2))
+
+    assert inbox.unread_count() == 2
+    assert inbox.unread_count(exclude_sender="bob") == 1

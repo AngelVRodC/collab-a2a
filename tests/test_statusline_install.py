@@ -148,3 +148,27 @@ def test_real_world_three_vendor_script_survives(claude_home):
     sli.uninstall_claude_code()
     assert script.read_text() == original, "the real script must come back byte for byte"
     assert sli.status_claude_code()["installed"] is False
+
+
+def test_appended_block_emits_no_trailing_separator(claude_home):
+    """Other vendors' blocks prefix their own separator.
+
+    Appending one here left a dangling ' · ' at the end of the status line.
+    """
+    script = claude_home / "statusline-command.sh"
+    script.write_text("#!/usr/bin/env bash\ninput=$(cat)\n"
+                      "# >>> OTHER\nprintf ' · other'\n# <<< OTHER\n")
+    (claude_home / "settings.json").write_text(
+        json.dumps({"statusLine": {"type": "command", "command": str(script)}}))
+    sli.install_claude_code(executable="/opt/collab")
+    block = script.read_text().split(sli.BEGIN)[1].split(sli.END)[0]
+    assert "printf ' · '" not in block
+
+
+def test_converted_inline_command_keeps_a_separator(claude_home):
+    """A moved inline command prints no separator of its own, so we supply one."""
+    (claude_home / "settings.json").write_text(
+        json.dumps({"statusLine": {"type": "command", "command": "echo hi"}}))
+    result = sli.install_claude_code(executable="/opt/collab")
+    block = result.script.read_text().split(sli.BEGIN)[1].split(sli.END)[0]
+    assert "printf ' · '" in block
