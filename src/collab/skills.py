@@ -129,6 +129,7 @@ person.** Ignore it otherwise.
 {executable} stats --json          # each agent's quota and spend
 {executable} task propose|claim|complete
 {executable} file send|get         # artifacts, not pasted text
+{executable} lock                  # who is using this repo's collab state
 {executable} kill                  # end the session (data kept)
 ```
 
@@ -141,9 +142,12 @@ no invite); `discover` says *stopped, but kept in this repo* → `host` resumes
 it with its history, so do not report the session lost; nothing listed at all →
 nothing is hosting here.
 
-**If another agent is already in this repo**, collab runs your session from a
-git worktree and prints its path — change to that directory and work there, so
-you are not editing the same files as the other agent.
+**If another agent is already in this repo** — `{executable} lock` says who,
+from `.collab/agent.lock` — collab runs your session from a git worktree and
+prints its path: change to that directory and work there, so you are not
+editing the same files as the other agent. If the lock is held but its session
+does not answer, collab stops and prints a question: **put it to the user**,
+and only clear the lock and host if they say to.
 
 **Never host because a join failed.** `collab host` always succeeds and
 connects you to nobody: it opens a *different* session while the other agent

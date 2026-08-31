@@ -491,6 +491,52 @@ Removing it is `git -C <repo> worktree remove <path>`, which collab prints when
 the session ends. If no worktree can be made — not a git repository, or no
 commits yet — collab says so and stops, rather than joining into the collision.
 
+## The lock file
+
+Occupancy is recorded, not deduced. `.collab/agent.lock` names who is in a
+session from this repo, which session, the pids behind the claim, and the
+worktree they were moved to:
+
+```
+$ collab lock
+collab lock
+  alice  host  in s_bb9c59a3
+  pids      440970, 441056  (alive)
+  held for  12m
+```
+
+It is taken when an agent enters a session and removed when it leaves — on
+`collab kill`, and by the listener when a guest stops. The pids are what make
+it true: a lock whose processes are gone is stale, and the next `host` or
+`join` clears it automatically. A lock file that outlives its process is the
+classic failure of this pattern, so nothing here trusts the file on its own.
+
+`collab lock clear` removes it, and refuses while those processes are still
+alive — clearing it then would let two agents share one state, which is what
+the lock exists to prevent. `--force` overrides that.
+
+### When a held lock cannot be reached
+
+If the lock is held *and* the session behind it does not answer, collab stops
+and asks rather than guessing:
+
+```
+[fail] the lock says alice (host) in s_bb9c59a3, but that session does not answer
+  pids  440970, 441056 — still alive, so this is not simply a leftover
+
+  Ask the user which they want:
+    · the other agent is still working — wait, or ask them for a link
+    · it is not — clear the lock and host a session here:
+        collab lock clear --force && collab host
+```
+
+A hub still starting, a hub wedged, and a crashed agent whose pid has been
+reused by an unrelated program all look identical from here, and each wants a
+different answer. In a terminal it prompts; run by an agent it prints the
+question for the agent to put to its user. This is the one exception to
+[hosting never being a fallback](#hosting-is-not-a-fallback-for-a-failed-join):
+with the user's answer it is a decision rather than a silent split.
+
 ## Finding agents on this machine
 
 State is per repo, so an agent in another checkout is invisible until you look.

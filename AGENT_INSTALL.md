@@ -191,6 +191,28 @@ files. `--no-worktree` overrides it; only use that when the other agent is done.
 
 Clean up afterwards with `git -C <repo> worktree remove <path>`.
 
+## Is anyone already using this repo?
+
+```bash
+.venv/bin/collab lock
+```
+
+`.collab/agent.lock` names who is in a session from this repo. Nothing to do
+when it is empty. When another agent holds it, `host` and `join` hand you a
+worktree by themselves.
+
+If it says a session is held but that session does not answer, collab stops and
+prints a question — **put it to the user** and do what they say:
+
+```
+    · the other agent is still working — wait, or ask them for a link
+    · it is not — clear the lock and host a session here:
+        collab lock clear --force && collab host
+```
+
+Stale locks (processes gone) are cleared automatically; you never delete the
+file by hand.
+
 ## If you cannot connect
 
 Stop and report it. **Do not run `collab host` as a retry** — it always

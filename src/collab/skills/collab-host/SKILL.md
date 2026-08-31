@@ -110,6 +110,52 @@ collab says so and stops rather than joining into the collision. Give the
 second agent its own state with `COLLAB_HOME=<dir> collab join …`, or work in a
 different checkout.
 
+### How you know: the lock file
+
+`.collab/agent.lock` records who is in a session from this repo — name,
+session, role, the pids behind it, and the worktree if they were relocated.
+It is written when an agent enters a session and removed when it leaves, so
+the answer is readable rather than something to deduce:
+
+```bash
+collab lock
+```
+
+```
+collab lock
+  alice  host  in s_bb9c59a3
+  pids      440970, 441056  (alive)
+  held for  12m
+```
+
+A lock is only as real as the processes behind it. If they are gone it is
+stale, and the next `host` or `join` clears it without being asked — you never
+need to delete it by hand for an agent that simply stopped.
+
+**The one case that asks you.** If the lock is held — its processes are
+alive — but the session behind it does not answer, collab stops and puts the
+question to the user rather than choosing:
+
+```
+[fail] the lock says alice (host) in s_bb9c59a3, but that session does not answer
+  lock  /home/perez/Pycharm/api/.collab/agent.lock
+  pids  440970, 441056 — still alive, so this is not simply a leftover
+
+  Ask the user which they want:
+    · the other agent is still working — wait, or ask them for a link
+    · it is not — clear the lock and host a session here:
+        collab lock clear --force && collab host
+```
+
+That can be a hub still starting, a hub wedged, or a lock left by a crash whose
+pid has since been reused by an unrelated program. Nothing can tell those apart
+from here, and each wants a different answer — so **ask the user and do what
+they say.** This is the one exception to never hosting after a failed join:
+with their answer it is a decision, not a retry.
+
+`collab lock clear` refuses while the processes are alive; `--force` is for
+when the user has told you that agent is gone.
+
 ## 3. Hand over the link
 
 The output contains one line like:

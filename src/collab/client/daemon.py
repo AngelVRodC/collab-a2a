@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 from httpx_sse import aconnect_sse
 
-from .. import __version__, peers
+from .. import __version__, lockfile, peers
 from ..config import SessionProfile, share_stats_enabled, stats_source
 from ..protocol import EXT_PREFIX, Envelope
 from .bridge import Bridge
@@ -188,6 +188,18 @@ class Daemon:
                     "(`collab url` on their side)")
         return ""
 
+    def _refresh_lock(self) -> None:
+        """Keep our pid on the lock, so it stays provably ours.
+
+        The listener is restarted more often than the session is — a reconnect,
+        a `daemon stop`/`start` — and a lock naming a pid that no longer exists
+        reads as stale even while the agent is still here.
+        """
+        try:
+            lockfile.refresh(self.profile.home, listener_pid=os.getpid())
+        except OSError:
+            pass
+
     def _announce_locally(self) -> None:
         """Publish this session in the machine-wide registry.
 
@@ -284,6 +296,7 @@ class Daemon:
         last_refresh = 0.0
         while not self._stop.is_set():
             self._announce_locally()
+            self._refresh_lock()
             if (time.time() - last_refresh) > SNAPSHOT_REFRESH and self.state == "live":
                 if self._http is not None:
                     await self._refresh_snapshot(self._http)
@@ -410,6 +423,12 @@ class Daemon:
             self.state = "stopped"
             self.write_status()
             peers.withdraw(self.profile.session_id)
+            # A listener stopping is a guest leaving; for a host the hub is
+            # still there, so only give up the lock when it is ours to give.
+            held = lockfile.read(self.profile.home)
+            if held is not None and held.session_id == self.profile.session_id \
+                    and not self.profile.is_host:
+                lockfile.release(self.profile.home)
             with contextlib.suppress(OSError):
                 self.paths.pid.unlink()
 

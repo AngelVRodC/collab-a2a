@@ -54,6 +54,20 @@ def occupant(home: Path | str | None = None) -> SessionProfile | None:
     a profile behind and that must not be read as somebody being here.
     """
     root = Path(home) if home else collab_home()
+
+    # The lock is the explicit claim; prefer it, and let it stand in for a
+    # profile when the holder is a hub with no listener of its own running.
+    from . import lockfile
+
+    held = lockfile.holder(root)
+    if held is not None:
+        found = SessionProfile.load(held.session_id, root)
+        if found is not None:
+            return found
+        return SessionProfile(session_id=held.session_id, url=held.url,
+                              name=held.name, host_name=held.name,
+                              token="", home=str(root))
+
     sessions = root / "sessions"
     if not sessions.is_dir():
         return None

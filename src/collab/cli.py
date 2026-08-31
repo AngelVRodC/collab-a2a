@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, peers, update
+from . import __version__, lockfile, peers, update
 from .client import onboard
 from .client.daemon import (DaemonPaths, is_running, read_status,
                             stop as stop_daemon, stop_orphans)
@@ -287,6 +287,7 @@ def cmd_host(args: argparse.Namespace) -> int:
     except HubError as exc:
         warn(f"could not announce yourself: {exc}")
     status = onboard.ensure_daemon(profile) if not args.no_daemon else {}
+    _take_lock(profile, role="host", hub_pid=cfg.pid)
     if status.get("state") == "live":
         ok("listening")
     elif not args.no_daemon:
@@ -352,6 +353,152 @@ def _describe_stopped(entries: list[tuple[Any, dict[str, int]]]) -> None:
         print(f"    {c(cfg.session_id, '36')}  {dim('stopped')}  {detail}")
 
 
+def _take_lock(profile: SessionProfile, *, role: str, hub_pid: int = 0) -> None:
+    """Record that this repo's collab state is in use, and by whom.
+
+    Written where anyone can read it — the next agent, or a person wondering
+    why joining here behaves oddly — rather than left to be inferred from a
+    scan of pid files.
+    """
+    from .client.daemon import DaemonPaths
+
+    listener = 0
+    try:
+        listener = int(DaemonPaths(profile.dir).pid.read_text().strip())
+    except (OSError, ValueError):
+        pass
+    lockfile.acquire(lockfile.Lock(
+        name=profile.name, session_id=profile.session_id, role=role,
+        url=profile.url, worktree=str(Path.cwd()) if _in_worktree() else "",
+        hub_pid=hub_pid, listener_pid=listener,
+    ), profile.home)
+
+
+def _in_worktree() -> bool:
+    """Is the checkout we are in a linked worktree rather than the main one?"""
+    out = subprocess.run(["git", "rev-parse", "--git-common-dir", "--git-dir"],
+                         capture_output=True, text=True, check=False)
+    if out.returncode != 0:
+        return False
+    lines = out.stdout.split()
+    return len(lines) == 2 and lines[0] != lines[1]
+
+
+def _lock_blocks_us(session_id: str = "") -> "lockfile.Lock | None":
+    """The lock held by *another* agent, if there is one.
+
+    Our own session's lock is not somebody else being here — re-running join
+    for a session we are already in must not be read as a collision.
+    """
+    held = lockfile.holder()
+    if held is None or (session_id and held.session_id == session_id):
+        return None
+    return held
+
+
+def _lock_says_here_but_nothing_answers(lock: "lockfile.Lock") -> bool:
+    """A held lock whose session cannot be reached. Ask; do not decide.
+
+    Every mechanical check says the repo is occupied — the lock is there and
+    its processes are alive — and yet the session does not answer. That can be
+    a hub still starting, a hub wedged, a port taken by something else, or a
+    lock left by a crash whose pid has since been reused by an unrelated
+    program. Nothing here can tell those apart, and each wants a different
+    answer, so this is the one place that stops and asks rather than choosing.
+
+    Hosting is otherwise never the answer to a failed join: it opens a
+    different session with nobody in it. With the user's say-so it is a
+    decision; without it, it is a silent split.
+    """
+    fail(f"the lock says {lock.describe()}, but that session does not answer")
+    print(dim(f"  lock  {lockfile.lock_path()}"))
+    print(dim(f"  pids  {', '.join(str(p) for p in lock.pids) or 'none recorded'}"
+              " — still alive, so this is not simply a leftover"))
+    print()
+    print("  Ask the user which they want:")
+    print(dim("    · the other agent is still working — wait, or ask them for a link"))
+    print(dim("    · it is not — clear the lock and host a session here:"))
+    # --force because the lock is held: its pids are alive, which is precisely
+    # why this is a question and not a cleanup.
+    print(dim("        collab lock clear --force && collab host"))
+    print(dim("  this is the exception to \"never host as a fallback\" printed"
+              " above: with the user's answer it is a decision, not a retry"))
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # An agent is running this. It has a user to ask; we do not.
+        return False
+    try:
+        answer = input("\n  Clear the lock and host here? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in ("y", "yes")
+
+
+def cmd_lock(args: argparse.Namespace) -> int:
+    """Show or clear the record of who is using this repo's collab state."""
+    if args.action == "clear":
+        lock = lockfile.read()
+        if lock is None:
+            ok("no lock here")
+            return 0
+        if lock.held and not args.force:
+            fail(f"{lock.describe()} still has live processes"
+                 f" ({', '.join(str(p) for p in lock.pids)})")
+            print(dim("  clearing it now would let two agents share this repo's"
+                      " state, which is what the lock exists to prevent"))
+            print(dim("  re-run with --force if you know that agent is gone"))
+            return 1
+        lockfile.release()
+        ok("lock cleared" + ("" if lock.stale else " (forced)"))
+        return 0
+
+    lock = lockfile.read()
+    if lock is None:
+        heading("collab lock")
+        print(dim("  none — this repo's collab state is free"))
+        return 0
+    if args.json:
+        from dataclasses import asdict
+        print(json.dumps({**asdict(lock), "held": lock.held}, indent=2))
+        return 0
+    heading("collab lock")
+    print(f"  {c(lock.name, '1')}  {lock.role}  in {c(lock.session_id, '36')}")
+    if lock.worktree:
+        print(dim(f"  worktree  {lock.worktree}"))
+    print(dim(f"  pids      {', '.join(str(p) for p in lock.pids) or 'none'}"
+              f"  ({'alive' if lock.held else 'gone'})"))
+    print(dim(f"  held for  {int(lock.age() // 60)}m"))
+    if lock.stale:
+        print(dim("\n  stale — the next host or join will clear it by itself"))
+    return 0
+
+
+def _reachable(url: str, timeout: float = 3.0) -> bool:
+    """Does anything answer at this session's address?"""
+    if not url:
+        return False
+    import httpx
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            reply = client.get(url.split("#", 1)[0].rstrip("/")
+                               + "/.well-known/agent-card.json")
+        return reply.status_code < 500
+    except Exception:
+        return False
+
+
+def _host_args_from(args: argparse.Namespace) -> argparse.Namespace:
+    """The host command's arguments, carrying over what the join gave us."""
+    parser = build_parser()
+    hosted = parser.parse_args(["host"])
+    hosted.name = getattr(args, "name", "") or ""
+    hosted.focus = getattr(args, "focus", "") or ""
+    hosted.no_worktree = True          # we are already where we are hosting
+    return hosted
+
+
 def _relocate_to_worktree(args: argparse.Namespace, name: str) -> int | None:
     """If another agent already holds this repo's collab state, move aside.
 
@@ -368,7 +515,10 @@ def _relocate_to_worktree(args: argparse.Namespace, name: str) -> int | None:
 
     if getattr(args, "no_worktree", False):
         return None
-    taken = wt.occupant()
+    # The lock is the explicit statement; the listener scan is the fallback for
+    # a session that predates it or whose lock was lost.
+    lock = _lock_blocks_us()
+    taken = lock or wt.occupant()
     if taken is None:
         return None
 
@@ -379,6 +529,8 @@ def _relocate_to_worktree(args: argparse.Namespace, name: str) -> int | None:
         # Never fall through into the collision: the first agent goes quiet and
         # nothing says why.
         fail(f"{taken.name} is already using this repo's collab state")
+        if lock is not None:
+            print(dim(f"  the lock says: {lock.describe()}"))
         print(dim(f"  a worktree would keep you apart, but: {exc}"))
         print(dim("  give this agent its own state with"
                   " COLLAB_HOME=<dir> collab join …, or work in another checkout"))
@@ -398,6 +550,17 @@ def _relocate_to_worktree(args: argparse.Namespace, name: str) -> int | None:
     if completed.returncode == 0:
         print(dim(f"\n  remove it when you are done:"
                   f" git -C {repo} worktree remove {tree.path}"))
+        return completed.returncode
+
+    # The worktree was made and the join still failed. If a lock is what sent
+    # us here and the session behind it does not answer, that is the one
+    # ambiguity worth a question.
+    if lock is not None and lock.held and not _reachable(lock.url):
+        if not _lock_says_here_but_nothing_answers(lock):
+            return completed.returncode
+        lockfile.release()
+        ok("lock cleared — hosting here instead, as asked")
+        return cmd_host(_host_args_from(args))
     return completed.returncode
 
 
@@ -475,6 +638,7 @@ def cmd_join(args: argparse.Namespace) -> int:
 
     if orphans := stop_orphans(profile.home, keep=profile.session_id):
         ok(f"stopped {len(orphans)} leftover session listener(s)")
+    _take_lock(profile, role="host" if profile.is_host else "guest")
     ok(f"joined {c(profile.session_id, '36')} as {c(profile.name, '1')}"
        f" (host: {profile.host_name})")
     if status.get("state") == "live":
@@ -809,6 +973,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
                 fail("no active collab session in this repo")
                 return 1
             stopped = stop_daemon(current)
+            lockfile.release(current.home)
             ok(f"stopped listening to {current.session_id}"
                if stopped else "nothing was running")
             print(dim("  you are a guest here, so the hub belongs to "
@@ -824,6 +989,11 @@ def cmd_kill(args: argparse.Namespace) -> int:
     for cfg in targets:
         counts = session_summary(cfg) if not args.purge else {}
         result = stop_session(cfg, purge=args.purge)
+        # Leaving means leaving: a lock that outlives the session is exactly
+        # the failure this file is meant to avoid.
+        held = lockfile.read(cfg.home)
+        if held is None or held.session_id == cfg.session_id:
+            lockfile.release(cfg.home)
         what = []
         if result["hub_stopped"]:
             what.append("hub")
@@ -1306,7 +1476,7 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("join --local", "join a session already running on this machine"),
         ("discover", "collab sessions running on this machine"),
         ("sessions", "sessions this repo has hosted before"),
-        ("kill", "end a session (its history is kept)"),
+        ("kill", "lock", "end a session (its history is kept)"),
     ]),
     ("Talk", [
         ("send <text>", "post to the room, or --to NAME for a direct message"),
@@ -1414,6 +1584,14 @@ def build_parser() -> argparse.ArgumentParser:
     ss = sub.add_parser("sessions", help="sessions this repo has hosted before")
     ss.add_argument("--json", action="store_true")
     ss.set_defaults(func=cmd_sessions)
+
+    lk = sub.add_parser("lock", help="who is using this repo's collab state")
+    lk.add_argument("action", nargs="?", default="show", choices=["show", "clear"],
+                    help="show the lock (default), or clear it")
+    lk.add_argument("--force", action="store_true",
+                    help="clear a lock whose processes are still alive")
+    lk.add_argument("--json", action="store_true")
+    lk.set_defaults(func=cmd_lock)
 
     j = sub.add_parser("join", help="join a session and start collaborating")
     j.add_argument("url", nargs="?", default="",
