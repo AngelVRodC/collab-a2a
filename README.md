@@ -491,6 +491,23 @@ genuinely ambiguous, so pass `--home <dir>` or set `COLLAB_HOME`.
 nothing of yours remains in it. A directory that hosts a session is kept —
 that holds the only copy of the conversation, and stopping is not losing.
 
+### Choosing the folder
+
+`collab host` and `collab join` take `--home <folder>` — a folder name in this
+repo rather than a path from the current directory:
+
+```bash
+collab join --local s_bb9c59a3 --name bob --home .collab-review
+```
+
+In order: `.collab` by default; `.collab-<name>` when another agent's lock
+already holds `.collab`; whatever `--home` says, always.
+
+The flag is on `host` and `join` alone, because those are the commands that
+decide where a session lives. Later commands resolve `.collab` and
+`.collab-<name>` on their own; a folder named outside that convention has to be
+carried with `COLLAB_HOME=<folder>`, which collab points out when you pick one.
+
 ## The lock file
 
 Occupancy is recorded, not deduced. `.collab/agent.lock` names who is in a

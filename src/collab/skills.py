@@ -119,6 +119,7 @@ person.** Ignore it otherwise.
 ```bash
 {executable} host                  # start a session; prints a link to share
 {executable} join '<url>#<invite>' # join one (quote it — the # matters)
+{executable} host|join --home NAME # state folder (default .collab)
 {executable} discover              # what is running on this machine
 {executable} join --local <id>     # join one of those, no link needed
 {executable} listen --follow       # stream incoming messages (watch this)

@@ -495,6 +495,20 @@ def _host_args_from(args: argparse.Namespace) -> argparse.Namespace:
     return hosted
 
 
+def _home_from(given: str) -> Path:
+    """Read `--home` as a folder name, or as a path when it looks like one.
+
+    "a folder name" is what people mean nearly every time — `--home .collab-me`
+    is a directory in this repo, not a path relative to wherever the command
+    happened to be run from. A value with a separator in it, or an absolute
+    one, is taken at its word.
+    """
+    value = Path(given).expanduser()
+    if value.is_absolute() or len(value.parts) > 1:
+        return value.resolve()
+    return base_home().parent / given
+
+
 def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
     """Point this agent at its own state when the repo's default is taken.
 
@@ -506,7 +520,15 @@ def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
     Returns an exit code to stop on, or None to carry on.
     """
     if args.home:
-        os.environ["COLLAB_HOME"] = str(Path(args.home).resolve())
+        chosen = _home_from(args.home)
+        os.environ["COLLAB_HOME"] = str(chosen)
+        ok(f"using {c(chosen.name, '1')} for this session")
+        # Later commands find .collab and .collab-<name> by themselves. A folder
+        # you named yourself is outside that convention, so it has to be carried.
+        if not chosen.name.startswith(COLLAB_DIRNAME):
+            print(dim(f"       later commands need COLLAB_HOME={chosen}"
+                      f" — or name it {COLLAB_DIRNAME}-<something> and they"
+                      " will find it"))
         return None
 
     base = base_home()
@@ -1549,8 +1571,9 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--bind", default="127.0.0.1",
                    help="interface to bind; 0.0.0.0 exposes it on your LAN")
     h.add_argument("--focus", default="", help="what you are working on, shown to others")
-    h.add_argument("--home", default="", metavar="DIR",
-                        help="use this state directory instead of the repo default")
+    h.add_argument("--home", default="", metavar="FOLDER",
+                   help="state folder for this session (default .collab, or"
+                        " .collab-<name> when another agent already holds it)")
     h.add_argument("--title", default="",
                    help="a name for the session, shown to everyone")
     h.add_argument("--domain", default="",
@@ -1597,8 +1620,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="join a session running on this machine, no link needed")
     j.add_argument("--name", help="your display name")
     j.add_argument("--focus", default="", help="what you are working on, announced on arrival")
-    j.add_argument("--home", default="", metavar="DIR",
-                        help="use this state directory instead of the repo default")
+    j.add_argument("--home", default="", metavar="FOLDER",
+                   help="state folder for this session (default .collab, or"
+                        " .collab-<name> when another agent already holds it)")
     j.add_argument("--no-daemon", action="store_true", help="do not start listening")
     j.add_argument("--no-update-check", action="store_true",
                    help="do not check for a newer collab first")

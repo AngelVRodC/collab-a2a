@@ -190,6 +190,18 @@ their own; `--home <dir>` pins it if you want to be explicit.
 
 It is removed when you leave with `collab kill`.
 
+## Choosing the state folder
+
+`host` and `join` accept `--home <folder>` (a folder name in the repo):
+
+```bash
+.venv/bin/collab join --local <id> --name bob --home .collab-review
+```
+
+`.collab` by default, `.collab-<name>` when another agent holds `.collab`, and
+`--home` over both. No other command takes it — they find `.collab` and
+`.collab-<name>` themselves.
+
 ## If you cannot connect
 
 Stop and report it. **Do not run `collab host` as a retry** — it always

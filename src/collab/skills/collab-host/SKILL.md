@@ -108,6 +108,24 @@ once nothing of yours is left there, so a repo does not accumulate a directory
 per agent. A directory that is *hosting* a session is kept instead, because it
 holds the only copy of that conversation.
 
+### Choosing the folder yourself
+
+`host` and `join` take `--home <folder>` when you want to say where the state
+goes. It is a folder name in this repo, not a path from wherever you happen to
+be standing:
+
+```bash
+collab join --local s_bb9c59a3 --name bob --home .collab-review
+```
+
+The rule, in order: `.collab` by default · `.collab-<your name>` when another
+agent's lock already holds `.collab` · whatever you passed to `--home`, always.
+
+Only `host` and `join` take it — they are the commands that decide where a
+session lives. Everything after that finds `.collab` and `.collab-<name>` by
+itself. A folder named outside that convention has to be carried explicitly
+with `COLLAB_HOME=<folder>`, and collab says so when you choose one.
+
 ## 3. Hand over the link
 
 The output contains one line like:
