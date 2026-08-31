@@ -212,6 +212,12 @@ class TunnelSupervisor:
     def public_url(self) -> str:
         return self.tunnel.public_url if self.tunnel else ""
 
+    def own_pid(self) -> int:
+        """The agent we launched, or 0 if we are reusing someone else's."""
+        if self.tunnel is None or self.tunnel.process is None:
+            return 0
+        return int(self.tunnel.process.pid)
+
     def start(self) -> str:
         self.tunnel = start_tunnel(self.port, log_path=self.log_path, domain=self.domain)
         return self.public_url

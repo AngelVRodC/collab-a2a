@@ -46,10 +46,14 @@ def main() -> int:
     if supervisor is not None and supervisor.public_url:
         cfg.public_url = supervisor.public_url
         cfg.tunnel = "ngrok"
+        # Only what we started: a tunnel we merely reused belongs to whoever
+        # launched it, and stopping it would be taking something that is not
+        # ours.
+        cfg.tunnel_pid = supervisor.own_pid()
     else:
-        supervisor = None if supervisor is None else supervisor
         cfg.public_url = ""
         cfg.tunnel = "none"
+        cfg.tunnel_pid = 0
     # Written before serving so `collab host` can print the real URL.
     cfg.save()
 
@@ -58,6 +62,8 @@ def main() -> int:
         latest = HubConfig.load(cfg.session_id, cfg.home) or cfg
         latest.public_url = url
         latest.pid = os.getpid()
+        # A relaunched tunnel is a different process.
+        latest.tunnel_pid = supervisor.own_pid() if supervisor else 0
         latest.save()
         logger.warning("tunnel came back on a new address: %s", url)
 

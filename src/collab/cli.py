@@ -700,6 +700,8 @@ def cmd_kill(args: argparse.Namespace) -> int:
             what.append("hub")
         if result["daemon_stopped"]:
             what.append("listener")
+        if result.get("tunnel_stopped"):
+            what.append("tunnel")
         state = f"stopped {' and '.join(what)}" if what else "was not running"
         ok(f"{c(cfg.session_id, '36')} — {state}"
            + (" · data deleted" if result["purged"] else ""))

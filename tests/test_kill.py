@@ -84,3 +84,54 @@ def test_stopping_a_session_with_no_pids_recorded():
     assert result["hub_stopped"] is False
     assert result["daemon_stopped"] is False
     assert cfg.db_path.exists()
+
+
+def test_stopping_takes_the_tunnel_with_it(monkeypatch):
+    """A leaked agent leaves a public URL pointing at a dead port.
+
+    On a free plan it also occupies the one slot the next session needs, so
+    the next `collab host` silently gets no tunnel at all.
+    """
+    cfg = create_session("alice", 9000)
+    cfg.pid = 4242
+    cfg.tunnel_pid = 4244
+    cfg.save()
+    (cfg.dir / "daemon.pid").write_text("4243")
+
+    signalled: list[int] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append(pid))
+
+    result = stop_session(cfg)
+    assert signalled == [4242, 4243, 4244]
+    assert result["tunnel_stopped"] is True
+
+
+def test_a_tunnel_we_did_not_start_is_left_alone(monkeypatch):
+    """Reusing someone else's agent does not make it ours to stop."""
+    cfg = create_session("alice", 9000)
+    cfg.pid = 4242
+    cfg.tunnel_pid = 0          # we reused one rather than launching it
+    cfg.save()
+
+    signalled: list[int] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append(pid))
+
+    result = stop_session(cfg)
+    assert signalled == [4242]
+    assert result["tunnel_stopped"] is False
+
+
+def test_the_supervisor_reports_only_its_own_agent():
+    from collab.server.tunnel import Tunnel, TunnelSupervisor
+
+    class Proc:
+        pid = 999
+
+    sup = TunnelSupervisor(9000)
+    assert sup.own_pid() == 0, "nothing started yet"
+
+    sup.tunnel = Tunnel(public_url="https://x", process=None)
+    assert sup.own_pid() == 0, "a reused agent is not ours"
+
+    sup.tunnel = Tunnel(public_url="https://x", process=Proc())
+    assert sup.own_pid() == 999

@@ -27,6 +27,11 @@ class HubConfig:
     title: str = ""
     public_url: str = ""
     tunnel: str = "none"
+    #: The tunnel agent we started, if we started one. It runs in its own
+    #: process group so it outlives the hub, and nothing else records it — a
+    #: leaked agent leaves a public URL pointing at a dead port and, on a free
+    #: plan, occupies the one slot the next session needs.
+    tunnel_pid: int = 0
     #: A reserved ngrok domain, if one was given. Without it a restarted
     #: tunnel comes back on a new address and invalidates shared links.
     domain: str = ""
@@ -182,10 +187,12 @@ def stop_session(cfg: HubConfig, *, purge: bool = False) -> dict[str, Any]:
     import signal
 
     result = {"session_id": cfg.session_id, "hub_stopped": False,
-              "daemon_stopped": False, "purged": False}
+              "daemon_stopped": False, "tunnel_stopped": False, "purged": False}
 
+    result["tunnel_stopped"] = False
     for label, pid in (("hub_stopped", cfg.pid),
-                       ("daemon_stopped", _daemon_pid(cfg))):
+                       ("daemon_stopped", _daemon_pid(cfg)),
+                       ("tunnel_stopped", cfg.tunnel_pid)):
         if not pid:
             continue
         try:
