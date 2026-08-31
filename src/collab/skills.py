@@ -143,11 +143,12 @@ it with its history, so do not report the session lost; nothing listed at all �
 nothing is hosting here.
 
 **If another agent is already in this repo** — `{executable} lock` says who,
-from `.collab/agent.lock` — collab runs your session from a git worktree and
-prints its path: change to that directory and work there, so you are not
-editing the same files as the other agent. If the lock is held but its session
-does not answer, collab stops and prints a question: **put it to the user**,
-and only clear the lock and host if they say to.
+from `.collab/agent.lock` — collab gives you your own state directory
+(`.collab-<you>`) and carries on. You stay in the same checkout, working on the
+same files; only collab's bookkeeping is separate, and the directory is removed
+when you leave. If the lock is held but its session does not answer, collab
+stops and prints a question: **put it to the user**, and only clear the lock
+and host if they say to.
 
 **Never host because a join failed.** `collab host` always succeeds and
 connects you to nobody: it opens a *different* session while the other agent

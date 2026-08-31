@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -24,7 +25,10 @@ from .client.daemon import (DaemonPaths, is_running, read_status,
 from .client.hub_client import HubClient, HubError
 from .client.inbox import Inbox
 from .config import (
+    COLLAB_DIRNAME,
     SessionProfile,
+    agent_home,
+    base_home,
     collab_executable,
     collab_home,
     ensure_home,
@@ -171,7 +175,7 @@ def _short_state(state: str) -> str:
 def cmd_host(args: argparse.Namespace) -> int:
     _warn_outside_venv()
     _preflight_update(args)
-    if (code := _relocate_to_worktree(args, args.name or resolve_name())) is not None:
+    if (code := _own_state_dir(args, resolve_name(args.name))) is not None:
         return code
     ensure_home()
     name = resolve_name(args.name)
@@ -367,21 +371,13 @@ def _take_lock(profile: SessionProfile, *, role: str, hub_pid: int = 0) -> None:
         listener = int(DaemonPaths(profile.dir).pid.read_text().strip())
     except (OSError, ValueError):
         pass
+    home = Path(profile.home)
     lockfile.acquire(lockfile.Lock(
         name=profile.name, session_id=profile.session_id, role=role,
-        url=profile.url, worktree=str(Path.cwd()) if _in_worktree() else "",
+        url=profile.url,
+        state_dir=(str(home) if home.name != COLLAB_DIRNAME else ""),
         hub_pid=hub_pid, listener_pid=listener,
     ), profile.home)
-
-
-def _in_worktree() -> bool:
-    """Is the checkout we are in a linked worktree rather than the main one?"""
-    out = subprocess.run(["git", "rev-parse", "--git-common-dir", "--git-dir"],
-                         capture_output=True, text=True, check=False)
-    if out.returncode != 0:
-        return False
-    lines = out.stdout.split()
-    return len(lines) == 2 and lines[0] != lines[1]
 
 
 def _lock_blocks_us(session_id: str = "") -> "lockfile.Lock | None":
@@ -464,8 +460,8 @@ def cmd_lock(args: argparse.Namespace) -> int:
         return 0
     heading("collab lock")
     print(f"  {c(lock.name, '1')}  {lock.role}  in {c(lock.session_id, '36')}")
-    if lock.worktree:
-        print(dim(f"  worktree  {lock.worktree}"))
+    if lock.state_dir:
+        print(dim(f"  state     {lock.state_dir}"))
     print(dim(f"  pids      {', '.join(str(p) for p in lock.pids) or 'none'}"
               f"  ({'alive' if lock.held else 'gone'})"))
     print(dim(f"  held for  {int(lock.age() // 60)}m"))
@@ -495,79 +491,52 @@ def _host_args_from(args: argparse.Namespace) -> argparse.Namespace:
     hosted = parser.parse_args(["host"])
     hosted.name = getattr(args, "name", "") or ""
     hosted.focus = getattr(args, "focus", "") or ""
-    hosted.no_worktree = True          # we are already where we are hosting
+    hosted.home = os.environ.get("COLLAB_HOME", "")
     return hosted
 
 
-def _relocate_to_worktree(args: argparse.Namespace, name: str) -> int | None:
-    """If another agent already holds this repo's collab state, move aside.
+def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
+    """Point this agent at its own state when the repo's default is taken.
 
-    Returns the exit code of the relocated run, or None to carry on here. The
-    check is a *running listener*, not a profile on disk — a stopped session
-    leaves a profile behind and that is not somebody being here.
+    Two agents in one checkout collide over collab's state — one profile, one
+    listener, one inbox, one lock — and nothing else. So that is the only thing
+    separated: `.collab-bob` beside `.collab`, same working tree, same files,
+    which is what they are collaborating on in the first place.
 
-    Re-running ourselves in the worktree rather than pointing COLLAB_HOME at it
-    keeps every downstream step honest: the repo and branch reported to the
-    roster, the daemon's working directory, and where `collab` finds the
-    session next time are then all the same place.
+    Returns an exit code to stop on, or None to carry on.
     """
-    from . import worktree as wt
-
-    if getattr(args, "no_worktree", False):
-        return None
-    # The lock is the explicit statement; the listener scan is the fallback for
-    # a session that predates it or whose lock was lost.
-    lock = _lock_blocks_us()
-    taken = lock or wt.occupant()
-    if taken is None:
+    if args.home:
+        os.environ["COLLAB_HOME"] = str(Path(args.home).resolve())
         return None
 
-    repo = repo_root()
-    try:
-        tree = wt.create(repo, name, Path(args.worktree) if args.worktree else None)
-    except RuntimeError as exc:
-        # Never fall through into the collision: the first agent goes quiet and
-        # nothing says why.
-        fail(f"{taken.name} is already using this repo's collab state")
-        if lock is not None:
-            print(dim(f"  the lock says: {lock.describe()}"))
-        print(dim(f"  a worktree would keep you apart, but: {exc}"))
-        print(dim("  give this agent its own state with"
-                  " COLLAB_HOME=<dir> collab join …, or work in another checkout"))
-        return 1
+    base = base_home()
+    lock = lockfile.read(base)
+    if lock is None or not lock.held or lock.name == name:
+        return None                       # free, stale, or already ours
 
-    ok(f"{taken.name} is already in this repo — running from a worktree")
-    print(dim(f"       path   {tree.path}"))
-    print(dim(f"       branch {tree.branch}"))
-    print(dim("       work there, not in the original checkout"))
+    mine = agent_home(name)
+    os.environ["COLLAB_HOME"] = str(mine)
+    ok(f"{lock.name} is using this repo's {c(base.name, '1')}"
+       f" — yours is {c(mine.name, '1')}")
+    print(dim(f"       the lock says: {lock.describe()}"))
+    print(dim("       same checkout and same files; only the session state"
+              " is separate"))
+    return None
 
-    argv = [collab_executable(), *sys.argv[1:], "--no-worktree"]
-    # The child inherits this stdout and writes to it immediately; ours is
-    # block-buffered when piped, so without this our explanation of what just
-    # happened arrives after the output it is meant to introduce.
-    sys.stdout.flush()
-    completed = subprocess.run(argv, cwd=str(tree.path))
-    if completed.returncode == 0:
-        print(dim(f"\n  remove it when you are done:"
-                  f" git -C {repo} worktree remove {tree.path}"))
-        return completed.returncode
 
-    # The worktree was made and the join still failed. If a lock is what sent
-    # us here and the session behind it does not answer, that is the one
-    # ambiguity worth a question.
-    if lock is not None and lock.held and not _reachable(lock.url):
-        if not _lock_says_here_but_nothing_answers(lock):
-            return completed.returncode
-        lockfile.release()
-        ok("lock cleared — hosting here instead, as asked")
-        return cmd_host(_host_args_from(args))
-    return completed.returncode
+def _state_dir_note(profile: SessionProfile) -> None:
+    """Say how later commands will find this session, when it is not the default."""
+    home = Path(profile.home)
+    if home.name == COLLAB_DIRNAME:
+        return
+    print(dim(f"       later commands here find {home.name} on their own;"
+              f" force it with COLLAB_HOME={home}"))
 
 
 def cmd_join(args: argparse.Namespace) -> int:
     _warn_outside_venv()
     _preflight_update(args)
-    if (code := _relocate_to_worktree(args, args.name or resolve_name())) is not None:
+    if (code := _own_state_dir(args, resolve_name(args.name))) is not None:
         return code
     ensure_home()
 
@@ -978,6 +947,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
                if stopped else "nothing was running")
             print(dim("  you are a guest here, so the hub belongs to "
                       f"{current.host_name} and keeps running"))
+            _retire_state_dir(current.home)
             return 0
 
     if args.purge and not args.yes:
@@ -1011,7 +981,36 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
     if targets and not args.purge:
         print(f"       {dim('delete it for good with: collab kill --purge --yes')}")
+    if targets:
+        _retire_state_dir(targets[0].home)
     return 0
+
+
+def _retire_state_dir(home: Path | str) -> None:
+    """Remove a per-agent state directory once its agent has left.
+
+    Only a per-agent one, and only when nothing hosted lives in it. A guest's
+    directory holds a profile, a cached inbox and a lock — scratch, because the
+    conversation itself belongs to the host's database. Leaving one behind per
+    agent per repo would litter the checkout with directories nobody reads.
+
+    A directory that *hosts* a session holds the only copy of that
+    conversation, so it stays: stopping is not losing.
+    """
+    home = Path(home)
+    if home.name == COLLAB_DIRNAME:
+        return                            # the repo's own, never removed
+    try:
+        remaining = hosted_sessions(home)
+    except OSError:
+        remaining = []
+    if remaining:
+        print(dim(f"       {home.name} kept — it still hosts "
+                  f"{plural(len(remaining), 'session')}"))
+        return
+    shutil.rmtree(home, ignore_errors=True)
+    if not home.exists():
+        ok(f"removed {c(home.name, '1')} — nothing of yours is left in this repo")
 
 
 def cmd_sessions(args: argparse.Namespace) -> int:
@@ -1550,10 +1549,8 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--bind", default="127.0.0.1",
                    help="interface to bind; 0.0.0.0 exposes it on your LAN")
     h.add_argument("--focus", default="", help="what you are working on, shown to others")
-    h.add_argument("--worktree", default="", metavar="PATH",
-                        help="run from this git worktree instead of the repo itself")
-    h.add_argument("--no-worktree", action="store_true",
-                        help="join in place even if another agent is already using this repo")
+    h.add_argument("--home", default="", metavar="DIR",
+                        help="use this state directory instead of the repo default")
     h.add_argument("--title", default="",
                    help="a name for the session, shown to everyone")
     h.add_argument("--domain", default="",
@@ -1600,10 +1597,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="join a session running on this machine, no link needed")
     j.add_argument("--name", help="your display name")
     j.add_argument("--focus", default="", help="what you are working on, announced on arrival")
-    j.add_argument("--worktree", default="", metavar="PATH",
-                        help="run from this git worktree instead of the repo itself")
-    j.add_argument("--no-worktree", action="store_true",
-                        help="join in place even if another agent is already using this repo")
+    j.add_argument("--home", default="", metavar="DIR",
+                        help="use this state directory instead of the repo default")
     j.add_argument("--no-daemon", action="store_true", help="do not start listening")
     j.add_argument("--no-update-check", action="store_true",
                    help="do not check for a newer collab first")

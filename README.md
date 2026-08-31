@@ -460,42 +460,42 @@ anyone you would rather not have back.
 
 ## Two agents in one checkout
 
-State lives at the git top level — `<repo>/.collab/` — which is right for one
-agent per checkout and wrong the moment two share one. They would hold a single
-profile between them, write the same status file, and each stop the other's
-listener as a leftover. The first agent goes quiet and nothing says why.
+State lives in `<repo>/.collab/` — right for one agent per checkout, wrong the
+moment two share one. They would hold a single profile between them, write the
+same status file, and each stop the other's listener as a leftover. The first
+agent goes quiet and nothing says why.
 
-`collab host` and `collab join` therefore check whether another agent's
-listener is already running in this repo, and if it is, run from a git
-worktree — a different top level of the same repository, which is exactly the
-boundary the state is keyed on:
+`collab host` and `collab join` read the lock first, and when the repo's
+`.collab` is already held they give the arriving agent its own directory beside
+it:
 
 ```
-$ collab join --local s_bb9c59a3 --name bob
-[ok]   alice is already in this repo — running from a worktree
-       path   /home/perez/Pycharm/api-bob
-       branch collab/bob
-       work there, not in the original checkout
+$ collab join --local s_bb9c59a3 --name bob      # from a repo alice is in
+[ok]   alice is using this repo's .collab — yours is .collab-bob
+       the lock says: alice (host) in s_bb9c59a3
+       same checkout and same files; only the session state is separate
+[ok]   joined s_bb9c59a3 as bob (host: alice)
 ```
 
-Bob gets his own `.collab/` and his own files; alice never notices. The roster
-shows `api-bob/collab/bob`, so everyone can see which tree each agent's changes
-are in.
+Nobody moves. Same working tree, same files, same branch — two agents in one
+repo are collaborating on one codebase, and only collab's bookkeeping needs to
+be apart. The directory ignores itself, so `git status` stays clean.
 
-| | |
-|---|---|
-| `--worktree PATH` | put it somewhere specific |
-| `--no-worktree` | join in place anyway — only when the other agent has finished |
+**Later commands find it.** `collab send` runs as a fresh process with no
+memory of the join, so the directory is resolved from what is on disk: the
+default one unless its lock is held by someone else, and then the one
+per-agent directory whose lock is live. With three or more agents that is
+genuinely ambiguous, so pass `--home <dir>` or set `COLLAB_HOME`.
 
-Removing it is `git -C <repo> worktree remove <path>`, which collab prints when
-the session ends. If no worktree can be made — not a git repository, or no
-commits yet — collab says so and stops, rather than joining into the collision.
+**It leaves when you do.** `collab kill` removes the per-agent directory once
+nothing of yours remains in it. A directory that hosts a session is kept —
+that holds the only copy of the conversation, and stopping is not losing.
 
 ## The lock file
 
 Occupancy is recorded, not deduced. `.collab/agent.lock` names who is in a
 session from this repo, which session, the pids behind the claim, and the
-worktree they were moved to:
+state directory it is using:
 
 ```
 $ collab lock

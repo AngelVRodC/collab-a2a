@@ -142,84 +142,36 @@ Say what is there, including how much history, and ask.
 
 ## Two agents in one repo
 
-Collab keys its state on the git top level, so two agents working in the *same*
-checkout would share one `.collab/`: the second overwrites the first's profile
-with its own name and token, both listeners write the same files, and each
-reads the other's listener as a leftover and stops it. Nobody is told — the
-first agent simply goes quiet.
+Collab keeps its state in `<repo>/.collab/`, so two agents in the *same*
+checkout would share one of everything: one profile, one listener, one inbox,
+one lock. The second would overwrite the first's identity and each would stop
+the other's listener as a leftover. Nobody is told — the first agent just goes
+quiet.
 
-So when you host or join and another agent is already using this repo's collab
-state, collab makes you a **git worktree** and runs the session from there:
-
-```
-[ok]   alice is already in this repo — running from a worktree
-       path   /home/perez/Pycharm/api-bob
-       branch collab/bob
-       work there, not in the original checkout
-```
-
-**Read that last line literally: change to that directory and do your work
-there.** It is a real checkout of the same repository on its own branch, so
-edits, builds and commits are yours alone and neither agent has to coordinate
-file-by-file with the other. The roster shows it — the other agents see you on
-`api-bob/collab/bob`, which is how they know which tree your changes are in.
-
-- `--worktree PATH` puts it somewhere you choose.
-- `--no-worktree` joins in place anyway. Only when you know the other agent is
-  finished — otherwise you are choosing the collision.
-- Removing it when you are done is one command, and collab prints it for you:
-  `git -C <repo> worktree remove <path>`. The branch stays until you delete it.
-
-If a worktree cannot be made — not a git repo, or a repo with no commits yet —
-collab says so and stops rather than joining into the collision. Give the
-second agent its own state with `COLLAB_HOME=<dir> collab join …`, or work in a
-different checkout.
-
-### How you know: the lock file
-
-`.collab/agent.lock` records who is in a session from this repo — name,
-session, role, the pids behind it, and the worktree if they were relocated.
-It is written when an agent enters a session and removed when it leaves, so
-the answer is readable rather than something to deduce:
-
-```bash
-collab lock
-```
+So when the repo's `.collab` is already held, collab gives you your own state
+directory beside it and carries on:
 
 ```
-collab lock
-  alice  host  in s_bb9c59a3
-  pids      440970, 441056  (alive)
-  held for  12m
+[ok]   alice is using this repo's .collab — yours is .collab-bob
+       the lock says: alice (host) in s_bb9c59a3
+       same checkout and same files; only the session state is separate
+[ok]   joined s_bb9c59a3 as bob (host: alice)
 ```
 
-A lock is only as real as the processes behind it. If they are gone it is
-stale, and the next `host` or `join` clears it without being asked — you never
-need to delete it by hand for an agent that simply stopped.
+**You do not move.** Same directory, same working tree, same files — you and
+the other agent are collaborating on one codebase, which is the point. Only
+collab's own bookkeeping is separated.
 
-**The one case that asks you.** If the lock is held — its processes are
-alive — but the session behind it does not answer, collab stops and puts the
-question to the user rather than choosing:
+Later commands find it by themselves: `collab send`, `collab who` and
+`collab kill` run in the same repo and resolve to your directory, not the other
+agent's. Pass `--home <dir>` to pin it explicitly, or set `COLLAB_HOME`, if you
+ever need to be certain — with three or more agents in one repo that is the
+honest way to be unambiguous.
 
-```
-[fail] the lock says alice (host) in s_bb9c59a3, but that session does not answer
-  lock  /home/perez/Pycharm/api/.collab/agent.lock
-  pids  440970, 441056 — still alive, so this is not simply a leftover
-
-  Ask the user which they want:
-    · the other agent is still working — wait, or ask them for a link
-    · it is not — clear the lock and host a session here:
-        collab lock clear --force && collab host
-```
-
-That can be a hub still starting, a hub wedged, or a lock left by a crash whose
-pid has since been reused by an unrelated program. Nothing can tell those apart
-from here, and each wants a different answer — so **ask the user and do what
-they say.** This is the one exception to never hosting after a failed join:
-with their answer it is a decision, not a retry.
-
-`collab lock clear` refuses while the processes are alive; `--force` is for
-when the user has told you that agent is gone.
+**It is removed when you leave.** `collab kill` takes the directory with it
+once nothing of yours is left there, so a repo does not accumulate a directory
+per agent. A directory that is *hosting* a session is kept instead, because it
+holds the only copy of that conversation.
 
 ## 2. Read the snapshot you just got
 

@@ -2,7 +2,7 @@
 
 Occupancy used to be inferred by scanning pid files — correct, but invisible.
 An agent could not see that another agent was in a session here, nor who, nor
-from which worktree, so it went ahead and collided.
+in which state directory, so it went ahead and collided.
 
 The classic failure of a lock file is outliving its process, so nothing here
 trusts the file alone: it carries the pids behind it and counts as held only
@@ -37,12 +37,12 @@ def _lock(**kw):
 # --- writing -----------------------------------------------------------------
 
 def test_it_records_who_and_where(home):
-    lockfile.acquire(_lock(worktree="/tmp/api-bob"))
+    lockfile.acquire(_lock(state_dir="/repo/.collab-bob"))
     data = json.loads((home / "agent.lock").read_text())
 
     assert data["name"] == "alice"
     assert data["session_id"] == "s_1"
-    assert data["worktree"] == "/tmp/api-bob"
+    assert data["state_dir"] == "/repo/.collab-bob"
 
 
 def test_it_is_private_and_written_whole(home):
@@ -148,9 +148,9 @@ def test_a_lock_from_a_newer_collab_is_read_not_rejected(home):
 
 
 def test_it_describes_itself_for_a_person():
-    lock = _lock(worktree="/tmp/api-bob")
+    lock = _lock(state_dir="/repo/.collab-bob")
     text = lock.describe()
-    assert "alice" in text and "s_1" in text and "api-bob" in text
+    assert "alice" in text and "s_1" in text and ".collab-bob" in text
 
 
 def _gone(pid, sig):

@@ -35,11 +35,11 @@ def test_it_reports_an_empty_repo(capsys):
 
 
 def test_it_names_the_holder(capsys):
-    _held(worktree="/tmp/api-bob")
+    _held(state_dir="/repo/.collab-bob")
     main(["lock"])
     out = capsys.readouterr().out
 
-    assert "alice" in out and "s_1" in out and "api-bob" in out
+    assert "alice" in out and "s_1" in out and ".collab-bob" in out
     assert "alive" in out
 
 
@@ -115,23 +115,25 @@ def test_another_sessions_lock_is_not_ours_to_drop(monkeypatch):
     assert lockfile.read().session_id == "s_someone_else"
 
 
-# --- it drives the worktree decision ----------------------------------------
+# --- it decides which state directory we use --------------------------------
 
-def test_the_lock_makes_the_repo_look_occupied():
-    from collab import worktree as wt
+def test_a_held_lock_sends_us_to_our_own_directory(monkeypatch, repo):
+    from collab.config import base_home, resolve_home
 
-    assert wt.occupant() is None
+    monkeypatch.delenv("COLLAB_HOME", raising=False)
+    assert resolve_home("bob") == base_home(), "free: use the default"
+
     _held()
-    found = wt.occupant()
-    assert found is not None and found.name == "alice"
+    assert resolve_home("bob") == base_home().parent / ".collab-bob"
 
 
-def test_a_stale_lock_leaves_the_repo_free(monkeypatch):
-    from collab import worktree as wt
+def test_a_stale_lock_leaves_the_default_free(monkeypatch, repo):
+    from collab.config import base_home, resolve_home
 
+    monkeypatch.delenv("COLLAB_HOME", raising=False)
     _held(hub_pid=999999)
     monkeypatch.setattr(os, "kill", _gone)
-    assert wt.occupant() is None, "a dead claim is no claim"
+    assert resolve_home("bob") == base_home(), "a dead claim is no claim"
 
 
 def _gone(pid, sig):

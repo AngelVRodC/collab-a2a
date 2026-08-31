@@ -177,41 +177,18 @@ To read what was said before you started listening:
 
 ## If another agent is already in this repo
 
-Collab will tell you and hand you a worktree:
+Collab tells you and gives you your own state directory:
 
 ```
-[ok]   alice is already in this repo — running from a worktree
-       path   /home/perez/Pycharm/api-bob
-       branch collab/bob
+[ok]   alice is using this repo's .collab — yours is .collab-bob
+       same checkout and same files; only the session state is separate
 ```
 
-**Change to that directory and work there.** It is a real checkout of the same
-repo on its own branch, so you and the other agent are not editing the same
-files. `--no-worktree` overrides it; only use that when the other agent is done.
+**You stay where you are.** Same working tree, same files — only collab's
+bookkeeping is separate. Later commands in this repo find your directory on
+their own; `--home <dir>` pins it if you want to be explicit.
 
-Clean up afterwards with `git -C <repo> worktree remove <path>`.
-
-## Is anyone already using this repo?
-
-```bash
-.venv/bin/collab lock
-```
-
-`.collab/agent.lock` names who is in a session from this repo. Nothing to do
-when it is empty. When another agent holds it, `host` and `join` hand you a
-worktree by themselves.
-
-If it says a session is held but that session does not answer, collab stops and
-prints a question — **put it to the user** and do what they say:
-
-```
-    · the other agent is still working — wait, or ask them for a link
-    · it is not — clear the lock and host a session here:
-        collab lock clear --force && collab host
-```
-
-Stale locks (processes gone) are cleared automatically; you never delete the
-file by hand.
+It is removed when you leave with `collab kill`.
 
 ## If you cannot connect
 

@@ -111,64 +111,17 @@ list and let them choose — do not pick for them.
 
 ## If another agent is already in this repo
 
-Joining from a checkout that another agent is already using would have you
-share its `.collab/` — one profile, one listener, each overwriting the other.
-Collab spots that and runs your session from a git worktree instead:
+Sharing one `.collab/` would have you overwrite each other's profile and stop
+each other's listener. Collab spots that from the lock and gives you your own
+state directory instead:
 
 ```
-[ok]   alice is already in this repo — running from a worktree
-       path   /home/perez/Pycharm/api-bob
-       branch collab/bob
+[ok]   alice is using this repo's .collab — yours is .collab-bob
+       same checkout and same files; only the session state is separate
 ```
 
-**Work in that directory from then on.** `--no-worktree` opts out, and is the
-wrong choice unless the other agent has finished.
-
-### How you know: the lock file
-
-`.collab/agent.lock` records who is in a session from this repo — name,
-session, role, the pids behind it, and the worktree if they were relocated.
-It is written when an agent enters a session and removed when it leaves, so
-the answer is readable rather than something to deduce:
-
-```bash
-collab lock
-```
-
-```
-collab lock
-  alice  host  in s_bb9c59a3
-  pids      440970, 441056  (alive)
-  held for  12m
-```
-
-A lock is only as real as the processes behind it. If they are gone it is
-stale, and the next `host` or `join` clears it without being asked — you never
-need to delete it by hand for an agent that simply stopped.
-
-**The one case that asks you.** If the lock is held — its processes are
-alive — but the session behind it does not answer, collab stops and puts the
-question to the user rather than choosing:
-
-```
-[fail] the lock says alice (host) in s_bb9c59a3, but that session does not answer
-  lock  /home/perez/Pycharm/api/.collab/agent.lock
-  pids  440970, 441056 — still alive, so this is not simply a leftover
-
-  Ask the user which they want:
-    · the other agent is still working — wait, or ask them for a link
-    · it is not — clear the lock and host a session here:
-        collab lock clear --force && collab host
-```
-
-That can be a hub still starting, a hub wedged, or a lock left by a crash whose
-pid has since been reused by an unrelated program. Nothing can tell those apart
-from here, and each wants a different answer — so **ask the user and do what
-they say.** This is the one exception to never hosting after a failed join:
-with their answer it is a decision, not a retry.
-
-`collab lock clear` refuses while the processes are alive; `--force` is for
-when the user has told you that agent is gone.
+You stay where you are — same working tree, same files. It is removed when you
+leave.
 
 ## When it says nothing is running
 

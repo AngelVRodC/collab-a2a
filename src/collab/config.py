@@ -79,20 +79,87 @@ def repo_root(start: Path | None = None) -> Path:
     return start
 
 
-def collab_home(cwd: Path | None = None) -> Path:
-    """The per-repo state directory.
+def safe_slug(name: str) -> str:
+    """A directory-safe form of a display name."""
+    slug = "".join(ch if (ch.isalnum() or ch in "-_") else "-" for ch in name)
+    return slug.strip("-") or "agent"
+
+
+def base_home(cwd: Path | None = None) -> Path:
+    """The repo's default state directory, whoever ends up using it."""
+    return repo_root(cwd) / COLLAB_DIRNAME
+
+
+def agent_home(name: str, cwd: Path | None = None) -> Path:
+    """This agent's own state directory, beside the default one.
+
+    ``.collab-bob`` rather than a second checkout: what two agents in one repo
+    actually collide over is collab's state — one profile, one listener, one
+    inbox — and that is the only thing worth separating. Their files are the
+    thing they are collaborating on.
+    """
+    base = base_home(cwd)
+    return base.parent / f"{COLLAB_DIRNAME}-{safe_slug(name)}"
+
+
+def sibling_homes(cwd: Path | None = None) -> list[Path]:
+    """Every per-agent state directory in this repo."""
+    base = base_home(cwd)
+    try:
+        found = base.parent.glob(f"{COLLAB_DIRNAME}-*")
+    except OSError:
+        return []
+    return sorted(d for d in found if d.is_dir())
+
+
+def _held_by(home: Path) -> Any:
+    """The live lock on a directory, without clearing anything."""
+    from . import lockfile
+
+    lock = lockfile.read(home)
+    return lock if (lock is not None and lock.held) else None
+
+
+def resolve_home(name: str = "", cwd: Path | None = None) -> Path:
+    """Which state directory this invocation should use.
+
+    The default one unless another agent is holding it. Beyond that the answer
+    has to be findable by a *later* command — `collab send` runs as a fresh
+    process with no memory of the join — so it is derived from what is on disk
+    rather than from anything the first command kept to itself.
+    """
+    base = base_home(cwd)
+    held = _held_by(base)
+    if held is None:
+        return base
+    if name and held.name == name:
+        return base                      # the claim on it is ours
+
+    if name:
+        return agent_home(name, cwd)
+
+    # No name to go on. If exactly one per-agent directory is in use, it is
+    # unambiguous: the default is somebody else's and that one is ours.
+    live = [d for d in sibling_homes(cwd) if _held_by(d) is not None]
+    if len(live) == 1:
+        return live[0]
+    return base
+
+
+def collab_home(cwd: Path | None = None, name: str = "") -> Path:
+    """The state directory in use here.
 
     ``COLLAB_HOME`` overrides it outright, which is what lets a second profile
     (and the tests) run against the same repo without colliding.
     """
     if override := os.environ.get("COLLAB_HOME"):
         return Path(override)
-    return repo_root(cwd) / COLLAB_DIRNAME
+    return resolve_home(name, cwd)
 
 
-def ensure_home(cwd: Path | None = None) -> Path:
-    """Create ``.collab/`` on first use, with its own .gitignore."""
-    home = collab_home(cwd)
+def ensure_home(cwd: Path | None = None, name: str = "") -> Path:
+    """Create the state directory on first use, with its own .gitignore."""
+    home = collab_home(cwd, name)
     home.mkdir(parents=True, exist_ok=True)
     gitignore = home / ".gitignore"
     if not gitignore.exists():

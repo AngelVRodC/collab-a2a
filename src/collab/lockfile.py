@@ -3,7 +3,7 @@
 Occupancy used to be inferred: scan `.collab/sessions/*/`, load each profile,
 test whether its listener pid is alive. That works, but it is invisible — an
 agent (or a person) looking at a repo cannot see that another agent is in a
-session here, and nothing says who, since when, or from which worktree.
+session here, and nothing says who, since when, or in which state directory.
 
 So the fact is recorded rather than deduced: one small file at the root of
 `.collab/`, written when an agent enters a session and removed when it leaves.
@@ -26,13 +26,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import collab_home
-
 LOCK_NAME = "agent.lock"
 
 
 def lock_path(home: Path | str | None = None) -> Path:
-    return (Path(home) if home else collab_home()) / LOCK_NAME
+    if home is None:
+        # Imported here: config asks *us* which directories are claimed, so a
+        # module-level import in this direction would be a cycle.
+        from .config import collab_home
+
+        home = collab_home()
+    return Path(home) / LOCK_NAME
 
 
 def _alive(pid: int) -> bool:
@@ -53,7 +57,7 @@ class Lock:
     session_id: str
     role: str = "guest"          # "host" or "guest"
     url: str = ""
-    worktree: str = ""           # set when this agent was relocated
+    state_dir: str = ""          # set when this agent has its own
     hub_pid: int = 0
     listener_pid: int = 0
     created_at: float = field(default_factory=time.time)
@@ -80,7 +84,7 @@ class Lock:
         return max(time.time() - self.created_at, 0.0)
 
     def describe(self) -> str:
-        where = f" from {Path(self.worktree).name}" if self.worktree else ""
+        where = f" in {Path(self.state_dir).name}" if self.state_dir else ""
         return f"{self.name} ({self.role}) in {self.session_id}{where}"
 
 
@@ -124,7 +128,7 @@ def acquire(lock: Lock, home: Path | str | None = None) -> Path:
 
 
 def refresh(home: Path | str | None = None, **fields: Any) -> Lock | None:
-    """Update the pids or worktree on a lock we already hold."""
+    """Update the pids or the state directory on a lock we already hold."""
     lock = read(home)
     if lock is None:
         return None
