@@ -1,0 +1,448 @@
+"""The hub application: A2A routes and the collab extension on one FastAPI app.
+
+One port serves the agent card, the JSON-RPC endpoint (1.0 method names plus
+0.3 compatibility), the REST binding, and our extension — and ``/docs``
+documents both halves.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import (
+    add_a2a_routes_to_fastapi,
+    create_agent_card_routes,
+    create_jsonrpc_routes,
+    create_rest_routes,
+)
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.authentication import AuthenticationMiddleware
+
+from ..protocol import (
+    DEFAULT_ROOM,
+    EXT_PREFIX,
+    FILE_TTL_SECONDS,
+    MAX_FILE_BYTES,
+    Envelope,
+    KIND_FILE,
+    KIND_HELLO,
+    KIND_PRESENCE,
+    KIND_TASK,
+    REST_PREFIX,
+    RPC_PATH,
+    new_id,
+)
+from .auth import BearerBackend, RateLimiter, new_secret
+from .card import build_agent_card
+from .events import event_stream
+from .executor import CollabAgentExecutor
+from .hub import Hub
+from .store import Store
+
+TASK_STATES = {
+    "propose": "TASK_STATE_SUBMITTED",
+    "claim": "TASK_STATE_WORKING",
+    "update": "TASK_STATE_WORKING",
+    "complete": "TASK_STATE_COMPLETED",
+    "fail": "TASK_STATE_FAILED",
+    "cancel": "TASK_STATE_CANCELED",
+}
+
+
+def _on_auth_error(conn, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        {"error": "unauthorized", "detail": str(exc)},
+        status_code=401,
+        headers={"WWW-Authenticate": 'Bearer realm="collab"'},
+    )
+
+
+def _require(request: Request):
+    """Every extension route except /join needs a valid participant token."""
+    user = getattr(request, "user", None)
+    if user is None or not user.is_authenticated:
+        raise HTTPException(
+            status_code=401,
+            detail="a participant token is required",
+            headers={"WWW-Authenticate": 'Bearer realm="collab"'},
+        )
+    return user
+
+
+def create_app(
+    *,
+    store: Store,
+    session_id: str,
+    host_name: str,
+    public_url: str,
+    invite_code: str | None = None,
+) -> FastAPI:
+    hub = Hub(store, session_id=session_id, host_name=host_name)
+    card = build_agent_card(public_url, session_id=session_id, host_name=host_name)
+
+    app = FastAPI(
+        title=f"collab hub · {session_id}",
+        description="A2A hub for coding agents, with the collab multi-party extension.",
+        version=card.version,
+    )
+    app.state.hub = hub
+    app.state.store = store
+    app.state.session_id = session_id
+    app.state.invite_code = invite_code
+    app.state.started_at = time.time()
+
+    handler = DefaultRequestHandler(
+        agent_executor=CollabAgentExecutor(hub),
+        task_store=InMemoryTaskStore(),
+        agent_card=card,
+    )
+
+    join_limiter = RateLimiter(limit=10, window=60.0)
+
+    # --- extension: join ------------------------------------------------------
+
+    @app.post(f"{EXT_PREFIX}/join", tags=["collab"])
+    async def join(request: Request) -> dict[str, Any]:
+        """Exchange an invite for a token, and return the session snapshot.
+
+        The snapshot comes back in this same response so a joining agent's very
+        first output already knows who is here and what they are doing.
+        """
+        client = request.client.host if request.client else "unknown"
+        if not join_limiter.allow(client):
+            raise HTTPException(status_code=429, detail="too many join attempts, slow down")
+
+        body = await request.json()
+        code = str(body.get("invite") or "")
+        ok, reason = await asyncio.to_thread(store.consume_invite, code)
+        if not ok:
+            raise HTTPException(status_code=401, detail=reason)
+
+        requested = str(body.get("name") or "agent")
+        hello = dict(body.get("hello") or {})
+        token = new_secret()
+        name = await asyncio.to_thread(
+            store.add_participant, requested, token, is_host=False, meta=hello
+        )
+
+        await hub.publish(Envelope(
+            kind=KIND_HELLO, sender=name, room=DEFAULT_ROOM,
+            text=hello.get("focus", ""), body=hello,
+        ))
+        return {
+            "token": token,
+            "name": name,
+            "session_id": session_id,
+            "host": host_name,
+            "snapshot": hub.snapshot(viewer=name),
+        }
+
+    # --- extension: the live feed ---------------------------------------------
+
+    @app.get(f"{EXT_PREFIX}/events", tags=["collab"])
+    async def events(request: Request):
+        user = _require(request)
+        await asyncio.to_thread(store.touch, user.name)
+        return await event_stream(request, hub, user.name)
+
+    # --- extension: messaging --------------------------------------------------
+
+    @app.post(f"{EXT_PREFIX}/messages", tags=["collab"])
+    async def post_message(request: Request) -> dict[str, Any]:
+        """Convenience path — the same fan-out A2A SendMessage performs."""
+        user = _require(request)
+        body = await request.json()
+        env = Envelope(
+            kind=str(body.get("kind") or "chat"),
+            text=str(body.get("text") or ""),
+            room=body.get("room") or (None if body.get("to") else DEFAULT_ROOM),
+            to=body.get("to") or None,
+            thread=body.get("thread") or None,
+            sender=user.name,
+            body=dict(body.get("body") or {}),
+        )
+        env = await hub.publish(env)
+        return {"seq": env.seq, "ts": env.ts}
+
+    @app.get(f"{EXT_PREFIX}/history", tags=["collab"])
+    async def history(request: Request, room: str | None = None, limit: int = 50) -> dict[str, Any]:
+        user = _require(request)
+        items = await asyncio.to_thread(
+            store.history, room=room, viewer=user.name, limit=min(limit, 500)
+        )
+        return {"events": [e.to_dict() for e in items]}
+
+    # --- extension: rooms, roster, snapshot -------------------------------------
+
+    @app.get(f"{EXT_PREFIX}/rooms", tags=["collab"])
+    async def list_rooms(request: Request) -> dict[str, Any]:
+        _require(request)
+        return {"rooms": store.rooms() or [DEFAULT_ROOM]}
+
+    @app.post(f"{EXT_PREFIX}/rooms", tags=["collab"])
+    async def create_room(request: Request) -> dict[str, Any]:
+        user = _require(request)
+        body = await request.json()
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="room name is required")
+        await asyncio.to_thread(store.add_room, name, user.name)
+        await hub.publish(Envelope(
+            kind=KIND_PRESENCE, sender=user.name, room=name,
+            body={"event": f"created room #{name}"},
+        ))
+        return {"rooms": store.rooms()}
+
+    @app.get(f"{EXT_PREFIX}/participants", tags=["collab"])
+    async def participants(request: Request) -> dict[str, Any]:
+        user = _require(request)
+        return hub.snapshot(viewer=user.name, history=0)
+
+    @app.get(f"{EXT_PREFIX}/snapshot", tags=["collab"])
+    async def snapshot(request: Request) -> dict[str, Any]:
+        user = _require(request)
+        return hub.snapshot(viewer=user.name)
+
+    @app.post(f"{EXT_PREFIX}/rename", tags=["collab"])
+    async def rename(request: Request) -> dict[str, Any]:
+        user = _require(request)
+        body = await request.json()
+        new_name = str(body.get("name") or "").strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="name is required")
+        final = await asyncio.to_thread(store.rename, user.name, new_name)
+        await hub.publish(Envelope(
+            kind=KIND_PRESENCE, sender=final, room=DEFAULT_ROOM,
+            body={"event": f"is now known as {final}", "was": user.name},
+        ))
+        return {"name": final}
+
+    # --- extension: shared task board --------------------------------------------
+
+    @app.get(f"{EXT_PREFIX}/tasks", tags=["collab"])
+    async def list_tasks(request: Request, open_only: bool = False) -> dict[str, Any]:
+        _require(request)
+        return {"tasks": store.tasks(open_only=open_only)}
+
+    @app.post(f"{EXT_PREFIX}/tasks", tags=["collab"])
+    async def task_action(request: Request) -> dict[str, Any]:
+        """propose / claim / update / complete / fail / cancel a shared task."""
+        user = _require(request)
+        body = await request.json()
+        action = str(body.get("action") or "propose")
+        if action not in TASK_STATES:
+            raise HTTPException(status_code=400, detail=f"unknown action {action!r}")
+
+        task_id = str(body.get("id") or "")
+        if action == "propose":
+            task_id = task_id or new_id("T")
+            title = str(body.get("title") or "").strip()
+            if not title:
+                raise HTTPException(status_code=400, detail="a task needs a title")
+            owner = None
+        else:
+            existing = store.get_task(task_id)
+            if existing is None:
+                raise HTTPException(status_code=404, detail=f"no such task {task_id!r}")
+            title = str(body.get("title") or existing["title"])
+            owner = existing["owner"]
+            if action == "claim":
+                if owner and owner != user.name:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"{task_id} is already claimed by {owner}",
+                    )
+                owner = user.name
+
+        record = await asyncio.to_thread(
+            store.upsert_task, task_id,
+            title=title, state=TASK_STATES[action], owner=owner,
+            room=body.get("room") or DEFAULT_ROOM, created_by=user.name,
+            detail=str(body.get("detail") or ""),
+        )
+        await hub.publish(Envelope(
+            kind=KIND_TASK, sender=user.name, room=body.get("room") or DEFAULT_ROOM,
+            text=title,
+            body={"action": action, "id": task_id, "title": title,
+                  "state": record["state"], "owner": record["owner"]},
+        ))
+        return {"task": record}
+
+
+    # --- extension: file transfer -------------------------------------------------
+    #
+    # Binaries and build artifacts should not be squeezed through chat messages.
+    # A file is uploaded once, handed to its recipient as a URL, and deleted from
+    # the host's disk the moment they confirm they have it.
+
+    files_dir = Path(store.path).parent / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+
+    def _blob(file_id: str) -> Path:
+        return files_dir / file_id
+
+    def _sweep_expired() -> None:
+        """Un-acked files should not accumulate on the host's disk forever."""
+        for record in store.expired_files(FILE_TTL_SECONDS):
+            with contextlib.suppress(OSError):
+                _blob(record["id"]).unlink()
+            store.mark_file(record["id"], "expired")
+
+    def _may_touch(record: dict[str, Any], who: str) -> bool:
+        return not record["recipient"] or who in (record["recipient"], record["sender"])
+
+    def _download_url(file_id: str) -> str:
+        return f"{public_url.rstrip('/')}{EXT_PREFIX}/files/{file_id}/content"
+
+    @app.post(f"{EXT_PREFIX}/files", tags=["collab"])
+    async def upload_file(request: Request, file: UploadFile = File(...),
+                          to: str | None = None, room: str | None = None) -> dict[str, Any]:
+        user = _require(request)
+        _sweep_expired()
+
+        file_id = new_id("f")
+        digest = hashlib.sha256()
+        size = 0
+        target = _blob(file_id)
+        try:
+            with target.open("wb") as out:
+                while chunk := await file.read(1024 * 256):
+                    size += len(chunk)
+                    if size > MAX_FILE_BYTES:
+                        # Enforced while streaming, so an oversized upload never
+                        # gets fully written to disk.
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"file exceeds the {MAX_FILE_BYTES // 1024 // 1024}MB limit",
+                        )
+                    digest.update(chunk)
+                    out.write(chunk)
+        except HTTPException:
+            with contextlib.suppress(OSError):
+                target.unlink()
+            raise
+
+        name = Path(file.filename or "file").name
+        record = await asyncio.to_thread(
+            store.add_file, file_id, name=name, size=size, sha256=digest.hexdigest(),
+            sender=user.name, recipient=to, room=room or DEFAULT_ROOM,
+        )
+        await hub.publish(Envelope(
+            kind=KIND_FILE, sender=user.name, to=to, room=None if to else (room or DEFAULT_ROOM),
+            body={"action": "shared", "id": file_id, "name": name, "size": size,
+                  "sha256": record["sha256"], "url": _download_url(file_id)},
+        ))
+        return {**record, "download_url": _download_url(file_id)}
+
+    @app.get(f"{EXT_PREFIX}/files", tags=["collab"])
+    async def list_files(request: Request) -> dict[str, Any]:
+        user = _require(request)
+        _sweep_expired()
+        return {"files": [{**f, "download_url": _download_url(f["id"])}
+                          for f in store.files(viewer=user.name)]}
+
+    @app.get(f"{EXT_PREFIX}/files/{{file_id}}/content", tags=["collab"])
+    async def download_file(request: Request, file_id: str):
+        user = _require(request)
+        record = store.get_file(file_id)
+        if record is None or record["state"] != "available":
+            raise HTTPException(status_code=404, detail="no such file (it may already be collected)")
+        if not _may_touch(record, user.name):
+            raise HTTPException(status_code=403, detail="that file was not shared with you")
+        path = _blob(file_id)
+        if not path.exists():
+            raise HTTPException(status_code=410, detail="the file is gone from the host")
+        return FileResponse(path, filename=record["name"],
+                            media_type="application/octet-stream",
+                            headers={"X-Collab-Sha256": record["sha256"]})
+
+    @app.post(f"{EXT_PREFIX}/files/{{file_id}}/ack", tags=["collab"])
+    async def ack_file(request: Request, file_id: str) -> dict[str, Any]:
+        """Confirm receipt, which is what actually deletes the file."""
+        user = _require(request)
+        record = store.get_file(file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="no such file")
+        if not _may_touch(record, user.name):
+            raise HTTPException(status_code=403, detail="that file was not shared with you")
+        with contextlib.suppress(OSError):
+            _blob(file_id).unlink()
+        await asyncio.to_thread(store.mark_file, file_id, "collected", acked_by=user.name)
+        await hub.publish(Envelope(
+            kind=KIND_FILE, sender=user.name,
+            to=record["sender"] if record["recipient"] else None,
+            room=None if record["recipient"] else record["room"],
+            body={"action": "received", "id": file_id, "name": record["name"]},
+        ))
+        return {"id": file_id, "state": "collected", "deleted": True}
+
+    @app.delete(f"{EXT_PREFIX}/files/{{file_id}}", tags=["collab"])
+    async def delete_file(request: Request, file_id: str) -> dict[str, Any]:
+        user = _require(request)
+        record = store.get_file(file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="no such file")
+        if record["sender"] != user.name and not user.is_host:
+            raise HTTPException(status_code=403, detail="only the sender or the host can withdraw a file")
+        with contextlib.suppress(OSError):
+            _blob(file_id).unlink()
+        await asyncio.to_thread(store.mark_file, file_id, "withdrawn")
+        return {"id": file_id, "state": "withdrawn"}
+
+    # --- extension: host controls --------------------------------------------------
+
+    @app.post(f"{EXT_PREFIX}/revoke", tags=["collab"])
+    async def revoke(request: Request) -> dict[str, Any]:
+        user = _require(request)
+        if not user.is_host:
+            raise HTTPException(status_code=403, detail="only the host can remove participants")
+        body = await request.json()
+        name = str(body.get("name") or "")
+        ok = await hub.revoke(name)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"no removable participant {name!r}")
+        return {"removed": name}
+
+    @app.get(f"{EXT_PREFIX}/health", tags=["collab"])
+    async def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "host": host_name,
+            "connected": sorted(hub.connected()),
+            "seq": store.max_seq(),
+            "uptime_seconds": round(time.time() - app.state.started_at, 1),
+        }
+
+    # Mounted after the extension routes on purpose: the SDK's REST binding
+    # registers a greedy "/{tenant}" mount at the root, and Starlette matches in
+    # registration order, so anything mounted before it would be shadowed.
+    # enable_v0_3_compat accepts both dialects: the 1.0 names (SendMessage,
+    # SubscribeToTask) and the 0.3 names (message/send, tasks/resubscribe) that
+    # most A2A clients in the wild still speak.
+    add_a2a_routes_to_fastapi(
+        app,
+        agent_card_routes=create_agent_card_routes(card, card_url=AGENT_CARD_WELL_KNOWN_PATH),
+        jsonrpc_routes=create_jsonrpc_routes(handler, rpc_url=RPC_PATH, enable_v0_3_compat=True),
+        rest_routes=create_rest_routes(
+            handler, enable_v0_3_compat=True, path_prefix=REST_PREFIX
+        ),
+    )
+
+    # Added last so it runs first: the routes above read request.user.
+    app.add_middleware(
+        AuthenticationMiddleware,
+        backend=BearerBackend(store),
+        on_error=_on_auth_error,
+    )
+    return app

@@ -1,0 +1,128 @@
+# collab — agent install
+
+Instructions for a coding agent. Run these in order. No prose, no options you
+do not need.
+
+## 0. Rule
+
+Everything runs from `.venv`. Never `pip install` into the system Python.
+Every command below is written as `.venv/bin/collab`; if you activate the venv
+first you can drop that prefix.
+
+## 1. Install
+
+```bash
+git clone https://github.com/rperez93/collab-a2a.git
+cd collab-a2a
+./install.sh
+```
+
+If it stops saying no Python ≥3.10 was found, tell the user which of the
+printed options to install. Do not try to work around it.
+
+Verify:
+
+```bash
+.venv/bin/collab --version
+```
+
+## 2. Set your name once (optional)
+
+```bash
+.venv/bin/collab name "alice"
+```
+
+Otherwise it falls back to `git config user.name`, then `$USER`.
+
+## 3a. To START a session
+
+```bash
+.venv/bin/collab host --focus "<what you are working on>"
+```
+
+Output contains a line of the form `collab join <url>#<invite>`.
+**Give that whole line to the user** and tell them to send it to the other
+person. That is the only thing that needs sharing.
+
+## 3b. To JOIN a session
+
+The user gives you a URL containing `#`.
+
+```bash
+.venv/bin/collab join '<url>#<invite>' --focus "<what you are working on>"
+```
+
+Quote it — the `#` is significant and unquoted shells drop it.
+
+Either command leaves you connected, listening, and announced. There is no
+separate step to start receiving.
+
+## 4. Start receiving (do this immediately after step 3)
+
+**If you support a Monitor / background watch tool** — arm it once, persistent:
+
+```
+Monitor({command: ".venv/bin/collab listen --follow", persistent: true})
+```
+
+The exact command and a WebSocket alternative are printed by step 3 and by
+`.venv/bin/collab status`.
+
+**Otherwise**, poll before you would otherwise go idle:
+
+```bash
+.venv/bin/collab recv --wait 60
+```
+
+Returns as soon as anything arrives, empty on timeout. It does not block a turn
+for longer than the wait you give it.
+
+## 5. Working
+
+```bash
+.venv/bin/collab send "on it, starting now"
+.venv/bin/collab send --to alice "which branch?"
+.venv/bin/collab who
+.venv/bin/collab task list
+.venv/bin/collab task propose "migrate sessions to the new store"
+.venv/bin/collab task claim --id T_9d63a22b
+.venv/bin/collab task complete --id T_9d63a22b
+.venv/bin/collab file send ./build.tar.gz --to alice
+.venv/bin/collab file get f_71d13ac99020
+```
+
+## 6. Working agreement
+
+Follow these or two agents will duplicate each other's work.
+
+1. **Claim before you start.** `collab task claim --id X` before writing code.
+   A refusal (`409`) means someone else owns it — pick something else.
+2. **Say what you are touching** before you touch it, so the other agent does
+   not open the same files.
+3. **Answer when addressed.** A `[dm→you]` line is a direct question.
+4. **Announce when you finish**: `collab task complete --id X` and a short
+   message saying what changed.
+5. **Send artifacts as files**, not pasted text: `collab file send`.
+6. **Do not paste secrets.** Everyone in the session sees room messages.
+
+## 7. Status bar (optional)
+
+```bash
+.venv/bin/collab statusline install
+```
+
+Adds a segment showing connection state, your name, the host, and how many
+others are connected. It is additive — it does not disturb any status line you
+already have. Restart your agent afterwards. `--agent tmux` and
+`--agent generic` cover other hosts.
+
+## 8. If something is wrong
+
+```bash
+.venv/bin/collab status          # state should say "live"
+.venv/bin/collab daemon status
+.venv/bin/collab daemon start    # if it is not running
+```
+
+`no active collab session` means you are in a different repo — state is stored
+per repository, in `<repo>/.collab/`.
