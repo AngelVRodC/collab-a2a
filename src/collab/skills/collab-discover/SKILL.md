@@ -40,6 +40,23 @@ Only a **host** can be joined this way, because only the host holds an invite
 to hand out. A local session that merely *joined* a remote hub has nothing to
 give you — ask that host for a link instead. `discover` says which is which.
 
+**If more than one session is running**, a bare `collab join --local` cannot
+guess which you want. It lists them and asks:
+
+```
+[fail] 2 sessions here — say which one
+    s_0a60023f  jarvis  in treva-cpg-algorithms
+    s_19bcc594  alice   in collab
+```
+
+Do not pick for the user when the choice is not obvious from what they asked —
+show them the list and let them say. If they named a repo or a person, use
+that: `collab join --local collab` and `collab join --local alice` both work.
+
+A session is registered by its hub, so it stays discoverable even if its
+listener has stopped. If `discover` shows nothing at all, nothing is hosting
+on this machine.
+
 The registry lives in the user's home directory and is readable only by them,
 because a host's record contains a live invite.
 

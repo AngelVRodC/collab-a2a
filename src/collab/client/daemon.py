@@ -194,13 +194,13 @@ class Daemon:
         This is what lets an agent in another checkout on this machine find and
         join the session without anyone pasting a link around.
         """
-        invite = ""
+        invite, hub_pid = "", 0
         if self.profile.is_host:
             from ..server.session import HubConfig
 
             cfg = HubConfig.load(self.profile.session_id, self.profile.home)
             if cfg is not None:
-                invite = cfg.invite
+                invite, hub_pid = cfg.invite, cfg.pid
         try:
             peers.announce(
                 session_id=self.profile.session_id,
@@ -212,6 +212,9 @@ class Daemon:
                 participant_id=self.profile.participant_id,
                 invite=invite,
                 host_name=self.profile.host_name,
+                # A host registers its hub: the hub is what makes the session
+                # joinable, and it outlives this listener.
+                pid=hub_pid or None,
             )
         except OSError:
             pass

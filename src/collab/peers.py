@@ -130,17 +130,23 @@ def _record_path(session_id: str, pid: int | None = None) -> Path:
 
 def announce(*, session_id: str, name: str, role: str, url: str, repo: str,
              home: str, participant_id: str = "", invite: str = "",
-             host_name: str = "") -> Path:
-    """Publish (or refresh) this session's presence on the machine."""
+             host_name: str = "", pid: int | None = None) -> Path:
+    """Publish (or refresh) this session's presence on the machine.
+
+    ``pid`` is whose liveness decides whether the record still counts. A host
+    registers its *hub* process, because the hub is what makes the session
+    joinable — a session whose listener has stopped is still perfectly
+    reachable, and hiding it would be wrong.
+    """
     d = peers_dir()
     d.mkdir(parents=True, exist_ok=True)
     peer = Peer(
         session_id=session_id, name=name, role=role, url=url, repo=repo,
-        home=home, pid=os.getpid(), updated_at=time.time(),
+        home=home, pid=pid or os.getpid(), updated_at=time.time(),
         participant_id=participant_id, invite=invite, host_name=host_name,
         **identity(),
     )
-    path = _record_path(session_id)
+    path = _record_path(session_id, peer.pid)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(asdict(peer), indent=2))
     tmp.replace(path)
@@ -149,11 +155,26 @@ def announce(*, session_id: str, name: str, role: str, url: str, repo: str,
     return path
 
 
-def withdraw(session_id: str) -> None:
-    try:
-        _record_path(session_id).unlink()
-    except OSError:
-        pass
+def withdraw(session_id: str, pid: int | None = None) -> None:
+    """Remove our record for a session.
+
+    Without a pid this clears every record for that session written by a
+    process that is gone, so a stopped hub does not linger just because it was
+    registered under a pid the caller no longer knows.
+    """
+    if pid is not None:
+        try:
+            _record_path(session_id, pid).unlink()
+        except OSError:
+            pass
+        return
+    for child in peers_dir().glob(f"{session_id}-*.json"):
+        peer = load(child)
+        if peer is None or not peer.alive or peer.pid == os.getpid():
+            try:
+                child.unlink()
+            except OSError:
+                pass
 
 
 def load(path: Path) -> Peer | None:
@@ -169,36 +190,66 @@ def load(path: Path) -> Peer | None:
 
 
 def discover(*, include_stale: bool = False, prune: bool = True) -> list[Peer]:
-    """Every collab session running on this machine for this user."""
+    """Every collab session running on this machine for this user.
+
+    A session can be registered twice — once by its hub and once by its
+    listener — so entries are folded per session and role, keeping whichever
+    record can actually be joined and, failing that, the freshest.
+    """
     d = peers_dir()
     if not d.is_dir():
         return []
-    found: list[Peer] = []
+
+    best: dict[tuple[str, str], Peer] = {}
     for child in sorted(d.glob("*.json")):
         peer = load(child)
         if peer is None:
             continue
-        if peer.alive or include_stale:
-            found.append(peer)
-        elif prune:
-            # The process is gone; the record is just litter now.
-            try:
-                child.unlink()
-            except OSError:
-                pass
-    return found
+        if not (peer.alive or include_stale):
+            if prune:
+                # The process is gone; the record is just litter now.
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+            continue
+        key = (peer.session_id, peer.role)
+        current = best.get(key)
+        if current is None or _better(peer, current):
+            best[key] = peer
+    return sorted(best.values(), key=lambda p: (p.role != "host", p.session_id))
+
+
+def _better(candidate: Peer, current: Peer) -> bool:
+    """A joinable record beats one that is not; otherwise the fresher wins."""
+    if candidate.joinable != current.joinable:
+        return candidate.joinable
+    return candidate.updated_at > current.updated_at
+
+
+def candidates() -> list[Peer]:
+    """Sessions on this machine that can actually be joined.
+
+    Only a host holds an invite, so a session we merely joined has nothing to
+    hand on — listing it as a candidate would only produce a confusing failure
+    one step later.
+    """
+    return [p for p in discover() if p.joinable]
 
 
 def find(reference: str) -> Peer | None:
     """Look a session up by id, by name, or by the repo it runs in.
 
-    Only hosts can be joined, so a bare lookup prefers them — otherwise asking
-    to "join what is running here" could pick our own guest record.
+    With no reference this answers only when there is exactly one candidate.
+    Two joinable sessions is an ambiguity, not an absence — callers must use
+    :func:`candidates` to tell the difference and say which it is, because
+    reporting "nothing is running" when two things are running sends people
+    looking for a problem that is not there.
     """
     found = discover()
     if not reference:
-        hosts = [p for p in found if p.joinable]
-        return hosts[0] if len(hosts) == 1 else None
+        joinable = [p for p in found if p.joinable]
+        return joinable[0] if len(joinable) == 1 else None
     for peer in sorted(found, key=lambda p: not p.joinable):
         if reference in (peer.session_id, peer.name, peer.host_name):
             return peer

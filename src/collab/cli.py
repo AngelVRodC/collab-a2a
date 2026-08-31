@@ -259,6 +259,19 @@ def cmd_host(args: argparse.Namespace) -> int:
     except HubError:
         pass
     profile.save()
+
+    # Register the session the moment the hub is up, rather than waiting for
+    # the listener's first heartbeat — a hub that is serving should be
+    # discoverable even if its listener never starts.
+    try:
+        peers.announce(
+            session_id=cfg.session_id, name=cfg.host_name, role="host",
+            url=profile.url, repo=str(Path(cfg.home).parent), home=cfg.home,
+            invite=cfg.invite, host_name=cfg.host_name, pid=cfg.pid or None,
+        )
+    except OSError:
+        pass
+
     if orphans := stop_orphans(cfg.home, keep=cfg.session_id):
         ok(f"stopped {len(orphans)} leftover session listener(s)")
     try:
@@ -294,7 +307,22 @@ def cmd_join(args: argparse.Namespace) -> int:
     if args.local or not url:
         peer = peers.find(url or "")
         if peer is None:
-            fail("no joinable collab session found on this machine")
+            # Several is not none. Saying "nothing is running" when two things
+            # are running sends people hunting a problem that is not there.
+            options = peers.candidates()
+            if len(options) > 1 and not url:
+                fail(f"{len(options)} sessions here — say which one")
+                for option in options:
+                    print(f"    {c(option.session_id, '36')}  {option.name}"
+                          f"  in {Path(option.repo).name}")
+                print(dim("\n  collab join --local <session-id>"))
+                print(dim("  or by repo name, e.g. "
+                          f"collab join --local {Path(options[0].repo).name}"))
+                return 1
+            if url:
+                fail(f"no session here matches {url!r}")
+            else:
+                fail("no joinable collab session found on this machine")
             print(dim("  `collab discover` lists what is running here"))
             return 1
         if not peer.joinable:

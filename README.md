@@ -471,6 +471,21 @@ collab join --local api      # by session id, name, or repo
 Only a **host** can be joined this way — a local session that merely joined a
 remote hub has no invite to pass on, and `discover` says so.
 
+With more than one session running, `collab join --local` cannot guess which
+you mean, so it lists them and asks you to name one:
+
+```
+$ collab join --local
+[fail] 2 sessions here — say which one
+    s_0a60023f  jarvis  in treva-cpg-algorithms
+    s_19bcc594  alice   in collab
+
+  collab join --local <session-id>
+```
+
+A session is registered by its **hub**, so it stays discoverable and joinable
+even if its listener has stopped — the hub is what makes it reachable.
+
 Participants also carry a machine fingerprint, so **co-location is visible
 however they connected** — including two agents that both joined the same
 remote host from this one computer:
@@ -787,6 +802,8 @@ Then hand out `<that-url>#<invite>` — `collab url` reprints the invite.
 
 | Symptom | Cause / fix |
 |---|---|
+| `no joinable collab session found` | nothing is hosting here. `collab discover` lists what is running; if it lists something, that something is a *guest* and has no invite to pass on |
+| `N sessions here — say which one` | more than one is running, so name it: `collab join --local <session-id>` or by repo name |
 | `the name 'bob' is already taken` | someone in the session already answers to it — join with `--name <another>`. Names must be unique so a direct message is never a guess |
 | the public link stopped working | a free tunnel expired and came back on a **new address**. The hub notices and relaunches it, keeping the same session and tokens — run `collab url` for the current link and re-share it. `collab host --domain <reserved>.ngrok-free.app` pins an address that survives restarts |
 | `no active collab session` | you are in a different repo — state is per-repo; `collab status` shows where it looked |
