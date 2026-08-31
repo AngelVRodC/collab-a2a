@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title      TEXT NOT NULL,
     state      TEXT NOT NULL,
     owner      TEXT,
+    owner_id   TEXT,
     room       TEXT,
     created_by TEXT NOT NULL,
     created_at REAL NOT NULL,
@@ -132,6 +133,21 @@ def _migrate(db: sqlite3.Connection) -> None:
     # No back-fill: a row written before these columns cannot prove who its two
     # ends were, so it stays NULL and the route fails it closed.
     _ensure_columns(db, "files", {"sender_id": "TEXT", "recipient_id": "TEXT"})
+    _ensure_columns(db, "tasks", {"owner_id": "TEXT"})
+    # Tasks *are* back-filled, unlike files: a task board is durable, and a
+    # claimed task with no owner id would be actionable by anyone — wider than
+    # the hole this closes.  The WHERE is what makes re-running a no-op; the
+    # correlated sub-query leaves owner_id NULL where the name does not resolve.
+    db.execute(
+        "UPDATE tasks SET owner_id = ("
+        "  SELECT participant_id FROM participant_names"
+        "  WHERE participant_names.name = tasks.owner)"
+        " WHERE owner_id IS NULL AND owner IS NOT NULL"
+    )
+    # That UPDATE is the only DML here, and sqlite3 opens an implicit
+    # transaction for it.  Close it, or the caller's `PRAGMA journal_mode=WAL`
+    # fails with "cannot change into wal mode from within a transaction".
+    db.commit()
 
 
 def token_hash(token: str) -> str:
@@ -433,7 +449,8 @@ class Store:
     # --- shared task board ----------------------------------------------------
 
     def upsert_task(self, task_id: str, *, title: str, state: str, owner: str | None,
-                    room: str | None, created_by: str, detail: str = "") -> dict[str, Any]:
+                    owner_id: str | None, room: str | None, created_by: str,
+                    detail: str = "") -> dict[str, Any]:
         now = time.time()
         with self._lock:
             existing = self._db.execute(
@@ -441,14 +458,17 @@ class Store:
             ).fetchone()
             if existing is None:
                 self._db.execute(
-                    "INSERT INTO tasks (id,title,state,owner,room,created_by,created_at,updated_at,detail)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)",
-                    (task_id, title, state, owner, room, created_by, now, now, detail),
+                    "INSERT INTO tasks (id,title,state,owner,owner_id,room,created_by,"
+                    "created_at,updated_at,detail)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, title, state, owner, owner_id, room, created_by,
+                     now, now, detail),
                 )
             else:
                 self._db.execute(
-                    "UPDATE tasks SET title=?, state=?, owner=?, updated_at=?, detail=? WHERE id=?",
-                    (title or existing["title"], state, owner, now,
+                    "UPDATE tasks SET title=?, state=?, owner=?, owner_id=?, updated_at=?,"
+                    " detail=? WHERE id=?",
+                    (title or existing["title"], state, owner, owner_id, now,
                      detail or existing["detail"], task_id),
                 )
             self._db.commit()

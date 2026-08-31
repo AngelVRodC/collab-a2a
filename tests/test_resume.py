@@ -30,7 +30,7 @@ def _with_content(cfg, messages=3):
             store.append(Envelope(kind="chat", text=f"m{i}", sender="alice",
                                   room="general"))
         store.upsert_task("T_1", title="migrate sessions", state="TASK_STATE_SUBMITTED",
-                          owner=None, room="general", created_by="alice")
+                          owner=None, owner_id=None, room="general", created_by="alice")
     finally:
         store.close()
     return cfg

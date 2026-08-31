@@ -206,6 +206,33 @@ cancel   → TASK_STATE_CANCELED
 Claiming is the mechanism that stops two agents starting the same work: the
 second claim is refused with `409` naming the current owner.
 
+A task record — returned by `POST /tasks` and by `GET /tasks`, and carried in
+the join snapshot's `tasks[]` — carries:
+
+| Field | Meaning |
+|---|---|
+| `id`, `title`, `detail` | the work and its description |
+| `state` | one of the `TaskState` values above |
+| `owner` | the owner's display name, for showing to a human |
+| `owner_id` | the owner's participant id — **what every mutating action is decided on**. Null while the task is unclaimed, and on a record written before this field existed whose owner name no longer resolves |
+| `room`, `created_by`, `created_at`, `updated_at` | placement and lifecycle |
+
+Once a task is claimed, only its owner or the host may `update`, `complete`,
+`fail` or `cancel` it; anyone else gets `403`. Both the claim conflict and the
+ownership check match on `owner_id`, never on the display name, so renaming the
+owner changes nothing about who may act on their task — and whoever next claims
+a freed name inherits nothing. An **unclaimed** task has no owner to wrong and
+stays open to every participant.
+
+A task that names an `owner` but carries no `owner_id` — a record migrated from
+before the field existed, whose owner name no longer resolves — cannot prove who
+holds it, so it is refused to everyone but the host: a second claim gets `409`
+and every mutating action gets `403`.
+
+`propose` always mints its own `id`; sending one is `400`. It is the one action
+that does not check ownership, so accepting a caller's id would let anyone clear
+the owner of a claimed task by re-proposing it.
+
 ## 8. Session continuity
 
 A session is a durable thing: its id, its event log and its task board outlive

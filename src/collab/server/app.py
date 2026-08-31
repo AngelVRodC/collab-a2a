@@ -324,28 +324,46 @@ def create_app(
 
         task_id = str(body.get("id") or "")
         if action == "propose":
-            task_id = task_id or new_id("T")
+            if task_id:
+                # propose is the one action that skips the ownership branch,
+                # and upsert_task writes owner/owner_id unconditionally -- so
+                # re-proposing a claimed id would un-claim it for anyone.
+                raise HTTPException(
+                    status_code=400,
+                    detail="propose mints its own id; use claim to take an existing task",
+                )
+            task_id = new_id("T")
             title = str(body.get("title") or "").strip()
             if not title:
                 raise HTTPException(status_code=400, detail="a task needs a title")
-            owner = None
+            # Both branches reach the upsert below, so both must bind owner_id.
+            owner = owner_id = None
         else:
             existing = store.get_task(task_id)
             if existing is None:
                 raise HTTPException(status_code=404, detail=f"no such task {task_id!r}")
             title = str(body.get("title") or existing["title"])
-            owner = existing["owner"]
+            owner, owner_id = existing["owner"], existing["owner_id"]
             if action == "claim":
-                if owner and owner != user.name:
+                if (owner_id or owner) and owner_id != user.id:
                     raise HTTPException(
                         status_code=409,
                         detail=f"{task_id} is already claimed by {owner}",
                     )
-                owner = user.name
+                owner, owner_id = user.name, user.id
+            elif (owner_id or owner) and owner_id != user.id and not user.is_host:
+                # Claiming is what stops two agents starting the same work;
+                # letting anyone fail or cancel a claimed task makes the claim
+                # meaningless.  An unclaimed task has no owner to wrong, so it
+                # stays open to everyone — today's behaviour, unchanged.
+                # A task that names an owner the id back-fill could not resolve
+                # is refused rather than guessed at, the same way a file with no
+                # ids is: the host is then the only way to end it.
+                raise HTTPException(status_code=403, detail=f"{task_id} belongs to {owner}")
 
         record = await asyncio.to_thread(
             store.upsert_task, task_id,
-            title=title, state=TASK_STATES[action], owner=owner,
+            title=title, state=TASK_STATES[action], owner=owner, owner_id=owner_id,
             room=body.get("room") or DEFAULT_ROOM, created_by=user.name,
             detail=str(body.get("detail") or ""),
         )
