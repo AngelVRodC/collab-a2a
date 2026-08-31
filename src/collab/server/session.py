@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from pathlib import Path
 
+from .. import peers
 from ..config import collab_home, ensure_home
 from .auth import new_secret
 from .store import Store
@@ -190,6 +191,15 @@ def stop_session(cfg: HubConfig, *, purge: bool = False) -> dict[str, Any]:
               "daemon_stopped": False, "tunnel_stopped": False, "purged": False}
 
     result["tunnel_stopped"] = False
+    # Stop advertising it first. A hub takes a moment to shut down, and for
+    # that moment `os.kill(pid, 0)` still succeeds — so the machine registry
+    # goes on offering a session whose socket is already closed, and whoever
+    # takes the offer gets a bare "connection refused" instead of being told
+    # the session is down.
+    for pid in (cfg.pid, _daemon_pid(cfg)):
+        if pid:
+            peers.withdraw(cfg.session_id, pid)
+
     for label, pid in (("hub_stopped", cfg.pid),
                        ("daemon_stopped", _daemon_pid(cfg)),
                        ("tunnel_stopped", cfg.tunnel_pid)):

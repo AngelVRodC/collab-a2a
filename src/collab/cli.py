@@ -298,6 +298,39 @@ def cmd_host(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stopped_here(session_id: str = "") -> list[tuple[Any, dict[str, int]]]:
+    """Sessions this repo has on disk that are not currently running.
+
+    "Nothing is running" and "you have nothing" are different answers, and
+    giving the second when the first is true is what sends someone off to ask
+    the host to restart a session they could have brought back themselves.
+    """
+    from .server.session import hosted_sessions, session_summary
+
+    live = {p.session_id for p in peers.discover(prune=False)}
+    out = []
+    for cfg in hosted_sessions():
+        if cfg.session_id in live:
+            continue
+        if session_id and session_id not in cfg.session_id:
+            continue
+        out.append((cfg, session_summary(cfg)))
+    return out
+
+
+def _describe_stopped(entries: list[tuple[Any, dict[str, int]]]) -> None:
+    """Print what resuming each one would bring back."""
+    for cfg, summary in entries:
+        kept = []
+        if summary.get("messages"):
+            kept.append(f"{summary['messages']} messages")
+        if summary.get("open_tasks"):
+            n = summary["open_tasks"]
+            kept.append(f"{n} open task" + ("s" if n != 1 else ""))
+        detail = " · ".join(kept) or "no history yet"
+        print(f"    {c(cfg.session_id, '36')}  {dim('stopped')}  {detail}")
+
+
 def cmd_join(args: argparse.Namespace) -> int:
     _warn_outside_venv()
     _preflight_update(args)
@@ -319,11 +352,21 @@ def cmd_join(args: argparse.Namespace) -> int:
                 print(dim("  or by repo name, e.g. "
                           f"collab join --local {Path(options[0].repo).name}"))
                 return 1
+            stopped = _stopped_here(url or "")
             if url:
                 fail(f"no session here matches {url!r}")
             else:
                 fail("no joinable collab session found on this machine")
-            print(dim("  `collab discover` lists what is running here"))
+            if stopped:
+                # It exists, it just is not up. Only the repo holding it can
+                # bring it back, so say which repo that is.
+                where = Path(stopped[0][0].home).parent.name
+                print(dim(f"  but this repo has it on disk, stopped:"))
+                _describe_stopped(stopped)
+                print(dim(f"\n  `collab host` in {where} brings it back"
+                          " — the data is kept"))
+            else:
+                print(dim("  `collab discover` lists what is running here"))
             return 1
         if not peer.joinable:
             fail(f"{peer.session_id} is running here but is not the host, "
@@ -342,6 +385,14 @@ def cmd_join(args: argparse.Namespace) -> int:
         )
     except (ValueError, HubError) as exc:
         fail(str(exc))
+        # A local peer we could not reach is a session that went down between
+        # being advertised and being joined. Say that, rather than leaving a
+        # connection error as the whole explanation.
+        if args.local or not args.url:
+            if (stopped := _stopped_here()):
+                print(dim("  that session is down, but this repo still has it:"))
+                _describe_stopped(stopped)
+                print(dim("\n  `collab host` brings it back — the data is kept"))
         return 1
 
     if orphans := stop_orphans(profile.home, keep=profile.session_id):
@@ -760,8 +811,14 @@ def cmd_discover(args: argparse.Namespace) -> int:
     heading(f"collab on {ident['machine']} ({ident['user']})")
     if not found:
         print(dim("  nothing running here"))
-        print(dim("  start one with `collab host`, or join a remote session with "
-                  "`collab join <url>#<invite>`"))
+        stopped = _stopped_here()
+        if stopped:
+            print(dim("\n  stopped, but kept in this repo:"))
+            _describe_stopped(stopped)
+            print(dim("\n  `collab host` resumes the most recent"))
+        else:
+            print(dim("  start one with `collab host`, or join a remote session "
+                      "with `collab join <url>#<invite>`"))
         return 0
 
     for peer in found:
