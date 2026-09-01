@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -219,20 +220,50 @@ def global_config_path() -> Path:
     return Path.home() / ".config" / "collab" / "config.json"
 
 
+_CACHE: dict[str, Any] = {}
+
+
 def load_config() -> dict[str, Any]:
+    """The global config, re-read WHEN THE FILE CHANGES and not before.
+
+    Both halves matter. With no cache the viewer reads the whole file four
+    times a frame — theme, colour, name — which at 4 fps is sixteen reads a
+    second to answer the same question every time. And with a cache that
+    did not check the mtime, `collab theme classic` in another terminal would
+    never reach the panes you already have open — which is the whole point: the
+    setting is changed in one place and seen in all of them.
+
+    The stamp is (mtime, size). mtime has one-second resolution on some
+    filesystems, and two writes inside the same second —perfectly possible:
+    `collab color "#00cccc" && collab theme chat`— would give the same stamp. The
+    size tells them apart nearly always and costs nothing.
+    """
     p = global_config_path()
-    if not p.exists():
-        return {}
     try:
-        return json.loads(p.read_text())
-    except (OSError, ValueError):
+        st = p.stat()
+        stamp = (st.st_mtime, st.st_size)
+    except OSError:
+        _CACHE.clear()
         return {}
+    if _CACHE.get("stamp") == stamp:
+        return _CACHE["data"]
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    _CACHE.update(stamp=stamp, data=data)
+    return data
 
 
 def save_config(cfg: dict[str, Any]) -> None:
     p = global_config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cfg, indent=2) + "\n")
+    # So a writer never has to wait for their own change to "age": inside the
+    # same second the stamp might not have moved yet.
+    _CACHE.clear()
 
 
 def _git_user_name() -> str | None:
@@ -251,11 +282,27 @@ def _slug(name: str) -> str:
     return cleaned.strip("-").lower() or "agent"
 
 
+def _agent_name() -> str:
+    """The name in this agent's own identity file, or the one its directory says.
+
+    `.collab-alice` is itself a statement of who lives there, so an agent
+    running out of that directory answers to `alice` without anybody having
+    written it down twice.
+    """
+    from . import identity
+    try:
+        home = collab_home()
+        return str(identity.load(home).get("name") or identity.agent_slug(home))
+    except Exception:                                     # noqa: BLE001
+        return ""
+
+
 def resolve_name(explicit: str | None = None) -> str:
-    """--name  >  $COLLAB_NAME  >  global config  >  git user.name  >  $USER."""
+    """--name > $COLLAB_NAME > this agent's identity > global config > git > $USER."""
     for candidate in (
         explicit,
         os.environ.get("COLLAB_NAME"),
+        _agent_name(),
         load_config().get("display_name"),
         _git_user_name(),
         os.environ.get("USER") or os.environ.get("USERNAME"),
@@ -357,6 +404,183 @@ def set_stats_source(command: str | None = None,
         cfg["stats_interval"] = int(interval)
     save_config(cfg)
     return stats_source()
+
+
+#: The levels of the xterm-256 6x6x6 cube. They are not linear —they jump from
+#: 0 to 95— so the closest 256-colour to a hex has to be searched for, not
+#: dividiendo entre 51.
+_LEVELS = (0, 95, 135, 175, 215, 255)
+
+
+def hex_to_rgb(value: str) -> tuple[int, int, int] | None:
+    """«#00CCCC», «00cccc» or «#0cc» -> (0, 204, 204). None when it is not hex.
+
+    The three-digit form is accepted because it is what half the stylesheets
+    produce: `#0cc` is `#00cccc` with each digit doubled, not a half-written
+    hex.
+    """
+    raw = (value or "").strip()
+    v = raw.lstrip("#")
+    # THE SHORT FORM NEEDS THE HASH. `#0cc` is unambiguous; `255` is three hex
+    # digits AND a number somebody may have meant as one, and reading it as
+    # #225555 hands them a colour they did not ask for. Six digits are safe
+    # either way — no palette ever went that high.
+    if len(v) == 3:
+        if not raw.startswith("#"):
+            return None
+        v = "".join(c * 2 for c in v)
+    if len(v) != 6:
+        return None
+    # HEX ASCII, comprobado a mano: int(x, 16) acepta digitos unicode --«১২৩»
+    # becomes 291-- so «#১২৩» came out as a legitimate colour. Nobody meant
+    # that, and accepting it silently is worse than not understanding it.
+    if not all(ch in "0123456789abcdefABCDEF" for ch in v):
+        return None
+    try:
+        return int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
+    except ValueError:
+        return None
+
+
+def rgb_to_256(r: int, g: int, b: int) -> int:
+    """The closest xterm-256 index to that RGB.
+
+    Used when the terminal will NOT let colours be redefined. The cube has 216
+    shades, so the approximation is good for saturated colours and worse for
+    greys — which is the opposite of what is wanted here.
+    """
+    def nearest(v: int) -> int:
+        return min(range(6), key=lambda i: abs(_LEVELS[i] - v))
+    return 16 + 36 * nearest(r) + 6 * nearest(g) + nearest(b)
+
+
+def parse_color(value: str) -> str | None:
+    """`#00cccc` or `#0cc` -> "#00cccc". None for anything else.
+
+    HEX AND NOTHING ELSE, on purpose.
+
+    A table of colour names inside the tool is a table somebody has to keep,
+    and it answers a question it was never asked to answer: `teal` is one
+    colour here, another in CSS, another again on the machine next to you. A
+    hex triplet is exactly one colour everywhere, and whoever wants to type a
+    name can look its hex up — so can an agent doing it on their behalf.
+
+    rgb() and hsl() went with the names. They are conversions, and a conversion
+    inside a settings parser is a second place for a colour to come out
+    slightly wrong.
+
+    Returns None when it cannot be read — the caller decides what to say,
+    because a mis-typed colour has to warn rather than fall silently to
+    something close: whoever asked would be left thinking they have it on.
+    """
+    v = (value or "").strip().lower()
+    if not v:
+        return None
+    rgb = hex_to_rgb(v)
+    return "#%02x%02x%02x" % rgb if rgb is not None else None
+
+
+#: Between the timestamp and the speaker's name, in every theme.
+#:
+#: A MIDDLE DOT and not a hyphen or a bullet: it sits on the optical centre of
+#: the line by definition, so it reads as a separator rather than as a mark
+#: hanging off one of the two things it separates. It is also the separator
+#: collab already uses everywhere else in its own output, so the viewer does not
+#: introduce a second convention for the same job.
+#:
+#: It lives here and not in the theme keys because it is not a matter of taste:
+#: `15:22 alice` with two spaces reads as one field that happens to have a
+#: number in front. The separator is what makes them two.
+HEADER_SEPARATOR = "·"
+
+DEFAULT_THEME = "classic"
+
+
+def theme_names() -> tuple[str, ...]:
+    """The built-in ones PLUS whatever the user has written.
+
+    Without this a theme in the folder could be resolved but not chosen:
+    `collab theme mine` answered that it does not know it. A place to add themes
+    where the added theme cannot be selected is not a place to add themes, it is
+    a file that gets read and thrown away.
+    """
+    from . import themes
+    return tuple(sorted(themes.all_themes()))
+
+
+def theme() -> str:
+    t = str(load_config().get("theme") or DEFAULT_THEME)
+    return t if t in theme_names() else DEFAULT_THEME
+
+
+def set_theme(name: str) -> str | None:
+    """None when the name does not exist: the caller is the one that warns.
+
+    Storing an unknown theme and falling back to the default in silence would
+    leave someone looking at the wrong theme convinced theirs is on.
+    """
+    n = (name or "").strip().lower()
+    if n not in theme_names():
+        return None
+    cfg = load_config()
+    cfg["theme"] = n
+    save_config(cfg)
+    return n
+
+
+
+def agent_identity(cwd=None, name: str = "") -> dict:
+    """This agent's own name and colour, from its own state directory.
+
+    Two agents in one repo already keep separate state; without this they still
+    shared one name and one colour for the whole machine, so the second one was
+    the same person in the same colour and only the hub's suffix told them
+    apart.
+    """
+    from . import identity
+
+    # THE DIRECTORY IS RESOLVED ONCE, not per call. Working out which state
+    # directory is ours reads the lock file, and the colour is asked for on
+    # every frame — so without this the viewer stats and reads a lock four
+    # times a frame to answer a question whose answer cannot change while
+    # the process is alive.
+    #
+    # COLLAB_HOME is part of the key because it overrides everything, and a
+    # test that changes it has to see the change.
+    key = (os.environ.get("COLLAB_HOME", ""), str(cwd or ""), name)
+    home = _HOME_CACHE.get(key)
+    if home is None:
+        home = collab_home(cwd, name)
+        _HOME_CACHE[key] = home
+    return identity.load(home)
+
+
+_HOME_CACHE: dict = {}
+
+
+def default_color() -> int | str | None:
+    # THIS AGENT FIRST, then the machine. A colour set for `alice` is
+    # alice's; the one in the global config is what any agent gets when it
+    # has not been given one of its own, which is what makes it a default
+    # rather than a setting that quietly overrides everybody.
+    try:
+        mine = agent_identity().get("color")
+    except Exception:                                     # noqa: BLE001
+        mine = None
+    if isinstance(mine, (int, str)) and str(mine).strip():
+        return mine
+    v = load_config().get("color")
+    return v if isinstance(v, (int, str)) else None
+
+
+def set_default_color(value: int | str | None) -> int | str | None:
+    cfg = load_config()
+    if value is None:
+        cfg.pop("color", None)
+    else:
+        cfg["color"] = value if isinstance(value, str) else int(value)
+    save_config(cfg)
+    return cfg.get("color")
 
 
 def set_default_name(name: str) -> str:

@@ -12,6 +12,15 @@ the network and keeps working through a reconnect.
 from __future__ import annotations
 
 import curses
+import random
+import subprocess
+import unicodedata
+
+from ..config import (HEADER_SEPARATOR, default_color, parse_color,
+                      resolve_name,
+                      hex_to_rgb, rgb_to_256, theme)
+import datetime as _dt
+import re
 import json
 import os
 import time
@@ -30,6 +39,7 @@ from ..protocol import (
     KIND_TASK,
 )
 from .. import peers
+from .. import themes
 from .daemon import DaemonPaths, is_running, read_status
 from .inbox import Inbox
 
@@ -48,9 +58,119 @@ C_ONLINE = 3
 C_OFFLINE = 4
 C_ACCENT = 5
 C_WARN = 6
-C_SPEAKER_BASE = 10
-SPEAKER_COLORS = (curses.COLOR_CYAN, curses.COLOR_MAGENTA, curses.COLOR_GREEN,
-                  curses.COLOR_YELLOW, curses.COLOR_BLUE, curses.COLOR_RED)
+#: The tone of a body line. Colour goes PER LINE and not per message: one of
+#: ours carries a ✓ and a ✗ in the same paragraph, so painting the whole thing
+#: red hides what worked and green hides the failure.
+C_GOOD = 7
+C_BAD = 8
+C_WARNLINE = 9
+C_INFO = 20      # blue · data, commands, figures
+C_BUTTON = 21
+C_TEXT = 22      # white · the body of a message that says nothing special
+
+#: How many lines of a message show before it folds, and how much of the width
+#: the bubble takes. The gap left on the opposite side is what makes it readable
+#: at a glance who sent it.
+#: What a theme that says nothing about folding gets. READ FROM themes.py
+#: rather than repeated here: two copies of the same number drift apart, and
+#: that already cost a `fold off` broken in one layout and fine in the other.
+FOLD_LINES = themes.DEFAULTS["fold"]
+BUBBLE_SHARE = 0.90
+
+#: AND A HARD CAP. No messaging app widens the bubble when you maximise the
+#: window: it keeps a comfortable width and uses the rest as air. Without this,
+#: at 200 columns you got 145-character lines — twice what the eye can follow
+#: without losing its place.
+# At 86 columns —this machine's pane— 85 %% is 73, so the cap does NOT bite:
+# the bubble comes out at the width asked for. It only starts above 129 columns,
+# which is where a line begins to be longer than the eye can follow without
+# losing the row. A cap that trims the width you were just asked for is not a
+# protection, it is a requirement change through the back door.
+#: THE CAP, AS A SHARE OF THE WHOLE SCREEN — not of the pane.
+#:
+#: The difference matters and is not theoretical: the conversation pane is
+#: usually a third of the window, so a cap computed on the pane narrows when you
+#: shrink the pane, which is exactly when there is least room. Against the
+#: screen the cap is the same however you look at it: a bigger window gives more
+#: room, dragging the border does not change the reading width.
+BUBBLE_MAX_SHARE = 0.40
+
+#: And a floor, because 40 % of a small window comes to nothing. Below this,
+#: BUBBLE_SHARE over the pane decides and this cap does not apply.
+BUBBLE_MAX_MIN = 40
+
+
+def _screen_width(panel: int) -> int:
+    """The width of the WINDOW where it can be known; otherwise, of the pane.
+
+    Inside tmux a pane does not know how wide the window is: `curses.COLS` is
+    the pane's. tmux is asked, and the answer is kept — it is a subprocess, and
+    calling it on every redraw would cost a process per keystroke. It is
+    refreshed when the pane changes size, which is when the window may have
+    changed too.
+    """
+    if _SCREEN.get("panel") == panel and _SCREEN.get("width"):
+        return int(_SCREEN["width"])
+    width = panel
+    if os.environ.get("TMUX"):
+        try:
+            r = subprocess.run(["tmux", "display-message", "-p", "#{window_width}"],
+                               capture_output=True, text=True, timeout=1.0)
+            if r.returncode == 0 and r.stdout.strip().isdigit():
+                width = max(panel, int(r.stdout.strip()))
+        except (OSError, subprocess.SubprocessError):
+            width = panel
+    _SCREEN.update(panel=panel, width=width)
+    return width
+
+
+_SCREEN: dict[str, int] = {}
+
+#: Below this the two-sided chat format is abandoned. 56 columns is where a
+#: bubble at 90 %% stops having room for its frame, its indent and a line anyone
+#: can read.
+NARROW_AT = 56
+
+#: Speaker pairs start well clear of the fixed ones: with a palette of twelve
+#: and a base of 10 they overlapped C_INFO(20), C_BUTTON(21) and C_TEXT(22), and
+#: the twelfth speaker would have repainted the white of the body.
+C_SPEAKER_BASE = 30
+#: TWELVE OF THE 256, PICKED FOR CONTRAST AND FOR HUE SEPARATION.
+#:
+#: The very dark ones are avoided (lost on black), the very light ones (they
+#: get confused with the white of the body) and the greys. The twelve are far
+#: enough apart in hue not to be mistaken for one another at a glance: sky,
+#: turquoise, green, lime, olive, gold, orange, salmon, pink, violet, lavender
+#: and mint.
+#:
+#: AN HONEST WARNING: they are calibrated for a DARK BACKGROUND, which is the
+#: normal case for a terminal. On white the middle ones lose contrast. There is
+#: no reliable way to ask a terminal what colour its background is, so an
+#: assumption is picked and declared rather than pretending it serves both.
+SPEAKER_COLORS_256 = (39, 43, 48, 118, 148, 178, 208, 203, 205, 141, 111, 85)
+
+#: If the terminal only has eight, these are the only ones that stand out.
+#: White is left out —it is the body colour— and so is black.
+SPEAKER_COLORS_8 = (curses.COLOR_CYAN, curses.COLOR_MAGENTA, curses.COLOR_GREEN,
+                    curses.COLOR_YELLOW, curses.COLOR_BLUE, curses.COLOR_RED)
+
+#: The palette in use and the order it is dealt in. The order is shuffled ONCE
+#: per process, so two people never share a colour while any are free — which is
+#: what used to fail: the colour came from `hash(name) % 6`, and two different
+#: names could land in the same slot with ten colours unused.
+SPEAKER_COLORS = SPEAKER_COLORS_8
+_ORDER: list[int] = list(range(len(SPEAKER_COLORS_8)))
+_SLOTS: dict[str, int] = {}
+
+
+def _deal_colours(total: int) -> None:
+    """Pick a palette for what the terminal supports and shuffle the deal."""
+    global SPEAKER_COLORS, _ORDER
+    SPEAKER_COLORS = (SPEAKER_COLORS_256 if total >= 256 else SPEAKER_COLORS_8)
+    _ORDER = list(range(len(SPEAKER_COLORS)))
+    random.shuffle(_ORDER)
+    _SLOTS.clear()
+
 
 KIND_MARK = {
     KIND_CHAT: " ",
@@ -61,8 +181,218 @@ KIND_MARK = {
 }
 
 
+#: Colours people have CHOSEN, read from the roster. They win over the
+#: automatic deal: whoever asks for a colour asks so they are recognised, and
+#: having a lottery change it at startup would be the exact opposite.
+_CHOSEN: dict[str, int] = {}
+#: Names the roster says belong to somebody else. Refilled on every refresh
+#: from the participant ids, and read by my_names(): a name I am not holding is
+#: not one of mine, however much my local config would like it to be.
+_OTHERS: set[str] = set()
+
+#: And the pairs we had to create for those colours, since they do not come
+#: from the palette: `curses.init_pair` has to be called once per new colour.
+_PARES_LIBRES: dict[int, int] = {}
+_PROXIMO_PAR = [C_SPEAKER_BASE + 40]
+
+
+def record_colours(personas) -> None:
+    """Note the chosen colours the roster carries.
+
+    Called on every refresh: if somebody changes theirs with `collab color`, the
+    change lands on the next redraw without restarting anything.
+    """
+    for p in personas or ():
+        name = str(p.get("name") or "")
+        # The roster carries it flat; `meta` is the older shape and is kept
+        # because a 1.4 hub still sends that and a viewer should not lose
+        # someone's colour over a version difference.
+        raw = p.get("color")
+        if raw in (None, ""):
+            raw = (p.get("meta") or {}).get("color")
+        if not name or raw in (None, ""):
+            _CHOSEN.pop(name, None)
+            continue
+        text = str(raw).strip()
+        if text.isdigit():
+            _CHOSEN[name] = int(text)
+        elif hex_to_rgb(text) is not None:
+            _CHOSEN[name] = text.lower()
+        else:
+            # An unreadable colour is ignored and falls back to the deal: any
+            # colour beats a viewer that dies on somebody else's metadata.
+            _CHOSEN.pop(name, None)
+
+
+#: Indices we have redefined to serve an exact hex. Taken from the top —255
+#: downwards— so as not to tread on the 216 of the cube, which is what
+#: everything else in the terminal uses.
+_PROXIMO_SLOT = [255]
+
+
+def _colour_index(value) -> int:
+    """From what the person asked for to the colour index to use.
+
+    A `#00CCCC` is served EXACTLY if the terminal allows redefining colours; if
+    not, it falls to the nearest of the 256. Both look fine: the difference
+    between exact and approximate is a couple of points of hue, and dying
+    because the terminal is limited would be far worse than getting close.
+    """
+    if isinstance(value, int):
+        return value
+
+    # IT GOES THROUGH parse_color, which understands name, index, hex, rgb()
+    # A theme value is either a hex colour or a variable; parse_color
+    # is what turns the first into something curses can use.
+    entendido = parse_color(str(value))
+    if isinstance(entendido, int):
+        return entendido
+    rgb = hex_to_rgb(entendido) if entendido else None
+    if rgb is None:
+        # -1 IS THE TERMINAL'S DEFAULT COLOUR, and the only honest thing to
+        # return here. It used to return C_TEXT, which is a PAIR ID used as a
+        # COLOUR INDEX: two different numbering schemes, the same number, and a
+        # a colour that came out dark green (colour 22 = #005f00)
+        # instead of the white that was meant.
+        return -1
+    aprox = rgb_to_256(*rgb)
+    try:
+        puede = curses.can_change_color() and curses.COLORS >= 256
+    except (curses.error, ValueError):
+        puede = False
+    if not puede:
+        return aprox
+    # Keyed by the NORMALISED hex and not by the raw string: «#00cccc» and
+    # «00cccc» are the same colour and took two of the ~24 slots there are.
+    if entendido in _HEX_SLOTS:
+        return _HEX_SLOTS[entendido]
+    slot = _PROXIMO_SLOT[0]
+    if slot <= 231:                       # we have used up the free ones
+        return aprox
+    _PROXIMO_SLOT[0] -= 1
+    try:
+        # curses speaks in thousandths, not in 0-255.
+        curses.init_color(slot, *(round(c * 1000 / 255) for c in rgb))
+    except (curses.error, ValueError):
+        return aprox
+    _HEX_SLOTS[entendido] = slot
+    return slot
+
+
+_HEX_SLOTS: dict[str, int] = {}
+
+
+def _pair_for(value) -> int:
+    """The curses pair for a colour that is not in the palette."""
+    color = _colour_index(value)
+    if color not in _PARES_LIBRES:
+        par = _PROXIMO_PAR[0]
+        _PROXIMO_PAR[0] += 1
+        try:
+            curses.init_pair(par, color, -1)
+        except (curses.error, ValueError):
+            # ValueError, not only curses.error: with the terminal not yet
+            # initialised, or the index out of range, curses raises ValueError
+            # and the narrower catch did not see it. One odd colour took the
+            # WHOLE viewer down instead of falling back to white.
+            return C_TEXT
+        _PARES_LIBRES[color] = par
+    return _PARES_LIBRES[color]
+
+
 def _speaker_pair(name: str) -> int:
-    return C_SPEAKER_BASE + (sum(name.encode()) % len(SPEAKER_COLORS))
+    """A person's colour: the next free one, not the one their name says.
+
+    It used to be `sum(name.encode()) % len(palette)`, i.e. a hash: two
+    different names could land on the same colour with ten others unused. Here
+    it is dealt in arrival order over a shuffled permutation, so IT DOES NOT
+    REPEAT while any are free. If they run out it starts again — with twelve
+    colours you need a thirteenth participant to see it.
+
+    Stable within the process: the same name always gives the same colour while
+    the viewer is open. It changes between runs, because the order is shuffled
+    at startup.
+    """
+    chosen = _CHOSEN.get(name)
+    if chosen is not None:
+        return _pair_for(chosen)
+    return _dealt_slot(name)
+
+
+def _dealt_slot(name: str) -> int:
+    """The DEALT colour, ignoring whatever the person chose.
+
+    Kept apart from _speaker_pair because themes need to be able to ask for
+    both: `$DEFAULT_COLOR` honours the choice —it is the global setting— and
+    `$SPEAKER` is the plain deal, for a theme that wants the frame colour to
+    differ from the one the person picked for their text.
+    """
+    if name not in _SLOTS:
+        _SLOTS[name] = C_SPEAKER_BASE + _ORDER[len(_SLOTS) % len(_ORDER)]
+    return _SLOTS[name]
+
+
+#: Theme variables, resolved WHEN PAINTING and not when loading. That is why
+#: `$DEFAULT_COLOR` follows whatever colour each person picks instead of
+#: freezing the one set the day the theme was written.
+_VARS = {
+    "$DEFAULT_COLOR": _speaker_pair,
+    "$SPEAKER": _dealt_slot,
+    "$TEXT": lambda _s: C_TEXT,
+    "$GOOD": lambda _s: C_GOOD,
+    "$BAD": lambda _s: C_BAD,
+    "$WARN": lambda _s: C_WARN,
+    "$INFO": lambda _s: C_INFO,
+    "$DIM": lambda _s: C_DIM,
+}
+
+
+def _theme_colour(value, speaker: str) -> int:
+    """A theme value to a curses pair.
+
+    Two forms: a variable (`$DEFAULT_COLOR`) or a hex colour (`#00cccc`). A
+    variable that does not exist falls back to
+    the text colour rather than killing the viewer: getting a theme wrong earns
+    you a warning from `collab theme --check`, not the loss of your chat.
+    """
+    if not isinstance(value, str) or not value:
+        return C_TEXT
+    if value.startswith("$"):
+        fn = _VARS.get(value.upper())
+        return fn(speaker) if fn else C_TEXT
+    return _pair_for(value)
+
+
+_THEME_CACHE: dict = {}
+
+
+def _current_theme() -> dict:
+    """The resolved theme, re-read when the name OR the files change.
+
+    The files are stat-ed on every redraw —a stat, not a read— so that editing
+    a theme shows up when you save. Without that, anyone tuning theirs would
+    have to close the viewer to see each change, and testing blind is what makes
+    nobody write themes.
+    """
+    chosen = theme()
+    # THE STAMP COMES FROM THE FILES, not from the folder. Saving an existing
+    # file does not change the folder's mtime, so a folder-level stamp meant
+    # editing your theme did nothing until you created another one — with nano,
+    # `cat >` or any editor that writes in place. That is precisely what this
+    # function's own docstring promised would work.
+    #
+    # load_md_themes already stamps per file, so the cheap thing to do is ask it
+    # and let its own cache decide whether to touch the disk.
+    try:
+        stamp = tuple(sorted(
+            (p.name, p.stat().st_mtime, p.stat().st_size)
+            for p in themes.user_themes_dir().iterdir()
+            if p.suffix.lower() in (".md", ".markdown")))
+    except OSError:
+        stamp = ()
+    if _THEME_CACHE.get("key") != (chosen, stamp):
+        _THEME_CACHE.update(key=(chosen, stamp), theme=themes.resolve(chosen))
+    return _THEME_CACHE["theme"]
 
 
 def _fmt_money(value: Any) -> str:
@@ -140,6 +470,33 @@ class Pane:
         self.follow = True
         self.offset = max(self.total - self.rows, 0)
 
+    def top_seq(self, rows: "list[Row]") -> int:
+        """Which message is at the top of the view right now.
+
+        Rows are not a stable way to remember a place: the same message is five
+        rows in `bubbles` and one in `log`, so an offset means something
+        different after a theme change. A seq means the same thing in both.
+        """
+        for row in rows[self.offset:self.offset + max(self.rows, 1)]:
+            if row.seq:
+                return row.seq
+        return 0
+
+    def hold(self, seq: int, rows: "list[Row]") -> None:
+        """Put that message back where the eye expects it.
+
+        Only when not following. At the bottom of a conversation the right
+        place is still the bottom — settle() handles that, and pinning a seq
+        instead would leave you a screen short of the newest message.
+        """
+        if self.follow or not seq:
+            return
+        for i, row in enumerate(rows):
+            if row.seq == seq:
+                self.offset = i
+                self.clamp()
+                return
+
     def to_start(self) -> None:
         self.follow = False
         self.offset = 0
@@ -169,7 +526,61 @@ class Model:
                 or self.profile.session_id)
 
     def participants(self) -> list[dict[str, Any]]:
-        return list(self.snapshot.get("participants") or [])
+        """The roster, with everyone's chosen colour recorded from it.
+
+        Here and not at startup: somebody changing their colour with `collab
+        color` mid-session shows up on the next redraw.
+        """
+        people = list(self.snapshot.get("participants") or [])
+
+        # WHOSE NAMES ARE NOT MINE — worked out first, because my_names() reads
+        # it. my_names() adds the global name so history signed before the hub
+        # suffixed me keeps my colour; but the global name differs from the
+        # session name precisely BECAUSE somebody else got there first, so
+        # seeding my colour under it painted my colour onto them and aligned
+        # their messages to my side of the screen.
+        #
+        # The roster settles it: an entry with a different participant id is a
+        # different person, whatever it is called.
+        mi_id = getattr(self.profile, "participant_id", "") or ""
+        _OTHERS.clear()
+        _OTHERS.update(p["name"] for p in people
+                       if p.get("name") and p.get("id")
+                       and p.get("id") != mi_id)
+
+        # MY OWN NAMES ARE CLEARED BEFORE THE ROSTER SPEAKS, so whatever
+        # survives is what the roster put there THIS TIME. Without it,
+        # `published` also counted what a previous frame seeded from my local
+        # config, so clearing my colour never reached the screen: the stale
+        # entry made it look published, and a published colour is not
+        # overwritten.
+        for n in my_names(self.profile.name):
+            _CHOSEN.pop(n, None)
+
+        record_colours(people)
+
+        # WHAT THE ROSTER MANAGED TO SET, asked of the same place that set it.
+        # Working it out separately —«does this person carry a colour?»— while
+        # record_colours measured something else —«is that colour legible?»—
+        # left a gap where a colour the hub published but this terminal cannot
+        # read suppressed the local one too, and you ended up with none.
+        published = set(_CHOSEN)
+
+        # THE ROSTER FIRST, MINE ONLY WHERE IT SAYS NOTHING. The other way
+        # round does not work: the roster carries `color = ""` for everyone who
+        # has not published yet, and record_colours reads that as «has no
+        # colour», erasing what was just seeded. Saying nothing is not saying
+        # no. So what is published still wins — it is what everyone else sees —
+        # but until it has travelled my local config is not lost on the way.
+        #
+        # `mine` is passed even when None: record_colours reads that as «no
+        # longer has a chosen colour» and drops it. Called only when there is
+        # one, CLEARING a colour would not show until a restart.
+        mine = default_color()
+        record_colours([{"name": n, "color": mine}
+                        for n in my_names(self.profile.name)
+                        if n not in published])
+        return people
 
     def load_initial(self, limit: int = 500) -> None:
         inbox = Inbox(self.profile.dir)
@@ -213,20 +624,112 @@ class Model:
         return added
 
 
+#: Marks that say how something went. Red BEATS green when both match:
+#: «not ok» and «WRONG, no failure but EXIT=0» carry both, and erring towards
+#: verde es el error caro. «CORRECTO» estuvo en la lista de verdes y se quito:
+#: turns up in ordinary prose constantly, and a colour that shows up in prose
+#: significar nada.
+_BAD = re.compile(r"✗|\bMAL\b|\bFALL[AOE]|\bERROR|\bROTO?\b|\bFALS[AO]\b|"
+                  r"\bFAILED?\b|\bBROKEN\b|EXIT=[1-9]|\bNO EXISTE\b", re.I)
+_GOOD = re.compile(r"✓|\bok\b|\bCONFIRMADO\b|\bAGUANTA\b|\bPASA\b|\bPASSED?\b|"
+                   r"EXIT=0|\bIDENTIC[AO]\b", re.I)
+_WARN = re.compile(r"⚠|\bAVISO\b|\bOJO\b|\bPENDIENTE\b|\bWARN\w*\b|"
+                   r"\bNO MEDIDO\b|\bINCOMPLETA\b|\bTODO\b", re.I)
+# Tested with match(), so it is anchored to the start of the line. The branch
+# for commands had no leading \s*, so «  git rev-list ...» — with the indent a
+# command is ALWAYS written with — did not match. The pattern looked right and
+# failed on the one shape it would actually meet.
+_DATA = re.compile(r"^\s*([`|+#-]|\w+\s*=|(git|python3?|node|bash|npm|collab|tmux)\b)", re.I)
+
+
+def line_pair(line: str) -> int:
+    """Which colour this line asks for. 0 = the speaker's, untouched."""
+    if not line.strip():
+        return 0
+    if _BAD.search(line):
+        return C_BAD
+    if _GOOD.search(line):
+        return C_GOOD
+    if _WARN.search(line):
+        return C_WARNLINE
+    if _DATA.match(line):
+        return C_INFO
+    return 0
+
+
+def _w(text: str) -> int:
+    """What it takes on screen, which is not the same as `len()`.
+
+    A kanji or an emoji takes TWO columns. Measured with `len()`, a bubble
+    containing `こんにちは` came out with the body twice as wide as its frame:
+    two different values for the same box. `east_asian_width` marks W and F as
+    wide, and emoji are handled by their ranges — without `wcwidth` installed
+    that part is an approximation, worth knowing before trusting the number.
+    """
+    width = 0
+    for c in text:
+        if unicodedata.east_asian_width(c) in ("W", "F"):
+            width += 2
+        elif 0x1F300 <= ord(c) <= 0x1FAFF or 0x2600 <= ord(c) <= 0x27BF:
+            width += 2
+        elif unicodedata.combining(c):
+            width += 0
+        else:
+            width += 1
+    return width
+
+
+def _pad(text: str, width: int) -> str:
+    """Pad to `columns` COLUMNS. `f"{x:<n}"` counts characters, so
+    con kanji dejaba el border derecho descolocado."""
+    return text + " " * max(0, width - _w(text))
+
+
+def _clip(text: str, width: int) -> str:
+    """Cut to `width` columns, with « … » when there is more."""
+    if _w(text) <= width:
+        return text
+    out = ""
+    for c in text:
+        if _w(out + c) > max(1, width - 1):
+            break
+        out += c
+    return out + "…"
+
+
 def _wrap(text: str, width: int) -> list[str]:
     if width <= 0:
         return [text]
-    out, line = [], ""
-    for word in text.split():
-        if len(line) + len(word) + 1 > width:
-            if line:
-                out.append(line)
-            line = word
-        else:
-            line = f"{line} {word}".strip()
-    if line or not out:
+    out: list[str] = []
+    for paragraph in (text or "").split("\n"):
+        if not paragraph.strip():
+            out.append("")
+            continue
+        line = ""
+        for word in paragraph.split():
+            # A WORD WIDER THAN THE BOX IS BROKEN. It used to be emitted
+            # whole and ran off the right edge taking the border with it: with
+            # a URL or a hash — an everyday thing between agents — the bubble
+            # was left open. Better to cut a URL than to break the frame.
+            while _w(word) > width:
+                if line:
+                    out.append(line)
+                    line = ""
+                piece = ""
+                for c in word:
+                    if _w(piece + c) > width:
+                        break
+                    piece += c
+                out.append(piece)
+                word = word[len(piece):]
+            if _w(line) + _w(word) + 1 > width:
+                if line:
+                    out.append(line)
+                line = word
+            else:
+                line = f"{line} {word}".strip()
         out.append(line)
-    return out
+    return out or [""]
 
 
 @dataclass
@@ -236,53 +739,415 @@ class Row:
     text: str
     pair: int = 0
     attr: int = 0
+    #: Which event produced it, so a click knows which one to fold. And whether
+    #: this row IS the button: without it a click would have to guess from text.
+    seq: int = 0
+    button: bool = False
+    #: The colour of the FRAME, which is not the colour of the content. On a
+    #: body line `pair` says how it went —red on failure— and the `│` live
+    #: inside that same string. Without keeping the sender's colour separately
+    #: the border cannot have it: the whole row is painted in the tone and the
+    #: sides get tinted with it.
+    edge: int = 0
+    #: How many leading characters go in `edge` instead of `pair`. A Row carries
+    #: one colour, and the roster needs two on the same line: the dot and the
+    #: name in the person's colour, the state and the focus in the neutral one.
+    #: Splitting the row in two would have split a line that reads as one thing.
+    head: int = 0
 
 
-def event_rows(env: Envelope, width: int, me: str) -> list[Row]:
-    clock = local_clock(env.ts)
-    mark = KIND_MARK.get(env.kind, " ")
-    speaker = env.sender or "?"
-    label = f"{speaker}{' (you)' if speaker == me else ''}"
-    head = f"{clock} {label:>14.14} {mark} "
-    indent = " " * len(head)
-    body_width = max(width - len(head) - 1, 20)
+#: The bubble's strokes. Drawn with box characters because the frame is what
+#: turns a log line into a message: without it the eye cannot tell where one
+#: ends and the next begins when both run to five lines.
+_TL, _TR, _BL, _BR, _H, _V = "╭", "╮", "╰", "╯", "─", "│"
 
+#: Events that are NOT conversation. In a messaging app «X joined the group» is
+#: not a bubble: it is a centred, quiet line, because it is not something
+#: somebody said to you.
+_SYSTEM = (KIND_HELLO, KIND_PRESENCE)
+
+
+def _body_lines(env: Envelope, width: int) -> list[str]:
+    """An event's text, already wrapped to the inside width of the bubble."""
     if env.kind == KIND_CHAT:
-        where = f"→{env.to}" if env.to else f"#{env.room}"
-        lines = _wrap(f"{where}  {env.text}", body_width)
-    elif env.kind == KIND_HELLO:
+        where = f"→{env.to}" if env.to else ""
+        head = f"{where}  " if where else ""
+        return _wrap(f"{head}{env.text}", width)
+    if env.kind == KIND_HELLO:
         b = env.body
-        where = ", ".join(x for x in (b.get("repo"), b.get("branch")) if x)
-        detail = "joined" + (f" from {where}" if where else "")
+        loc = ", ".join(x for x in (b.get("repo"), b.get("branch")) if x)
+        detail = "se unió" + (f" desde {loc}" if loc else "")
         if b.get("focus"):
             detail += f" — {b['focus']}"
-        lines = _wrap(detail, body_width)
-    elif env.kind == KIND_PRESENCE:
-        lines = _wrap(str(env.body.get("event", "")), body_width)
-    elif env.kind == KIND_TASK:
+        return _wrap(detail, width)
+    if env.kind == KIND_PRESENCE:
+        return _wrap(str(env.body.get("event", "")), width)
+    if env.kind == KIND_TASK:
         b = env.body
         state = str(b.get("state", "")).replace("TASK_STATE_", "").lower()
         owner = f" · {b['owner']}" if b.get("owner") else ""
-        lines = _wrap(f"{b.get('action','')} {b.get('id','')} "
-                      f"“{b.get('title','')}” [{state}]{owner}", body_width)
-    elif env.kind == KIND_FILE:
+        return _wrap(f"{b.get('action','')} {b.get('id','')} "
+                     f"“{b.get('title','')}” [{state}]{owner}", width)
+    if env.kind == KIND_FILE:
         b = env.body
         if b.get("action") == "received":
-            lines = _wrap(f"collected {b.get('name')} (deleted from host)", body_width)
-        else:
-            size = int(b.get("size") or 0)
-            lines = _wrap(f"shared {b.get('name')} ({size / 1024:.0f} KB) · "
-                          f"collab file get {b.get('id')}", body_width)
-    else:
-        lines = _wrap(env.text or str(env.body), body_width)
+            return _wrap(f"collected {b.get('name')} (deleted from the host)", width)
+        size = int(b.get("size") or 0)
+        return _wrap(f"compartido {b.get('name')} ({size / 1024:.0f} KB) · "
+                     f"collab file get {b.get('id')}", width)
+    return _wrap(env.text or str(env.body), width)
 
-    pair = _speaker_pair(speaker)
-    dim_kinds = (KIND_PRESENCE, KIND_HELLO)
-    rows = [Row(head + lines[0], pair,
-                curses.A_DIM if env.kind in dim_kinds else 0)]
-    for extra in lines[1:]:
-        rows.append(Row(indent + extra, pair,
-                        curses.A_DIM if env.kind in dim_kinds else 0))
+
+def _day(ts: str) -> str:
+    return ts[:10] if len(ts) >= 10 else ""
+
+
+def _day_label(ts: str) -> str:
+    """«today», «yesterday» or the date. A messaging app does not make you
+    work it out."""
+    try:
+        d = _dt.date.fromisoformat(_day(ts))
+    except (ValueError, TypeError):
+        return _day(ts)
+    delta = (_dt.date.today() - d).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "yesterday"
+    return d.strftime("%d %b %Y").lower()
+
+
+def _stamp(ts: str) -> str:
+    """«15:22» when it is today, «30 ago 15:22» when it is not.
+
+    The date only appears when it is needed. Always showing it means six extra
+    characters on every message to tell you something you already knew.
+    """
+    reloj = local_clock(ts)
+    try:
+        d = _dt.date.fromisoformat(ts[:10])
+    except (ValueError, TypeError):
+        return reloj
+    if d == _dt.date.today():
+        return reloj
+    meses = ("ene", "feb", "mar", "abr", "may", "jun",
+             "jul", "ago", "sep", "oct", "nov", "dic")
+    return f"{d.day} {meses[d.month - 1]} {reloj}"
+
+
+def _fold_lines_to(lines: list[str], fold: int, open_now: bool) -> tuple[list[str], int]:
+    """Which lines show and how many are left. ONCE, for both themes.
+
+    It was written twice —in event_rows and in classic_rows— differing by one
+    guard: with fold = 0, classic did not fold (correct) and chat computed
+    hidden = len(lines), i.e. replaced THE ENTIRE MESSAGE with a button. A
+    one-line message came out as «▸ show more (1 line)» and nothing else. It is
+    the same shape that already bit us with two independent _wrap functions: two
+    copies of the same sum drift apart, and the one that breaks is the one
+    nobody tests.
+    """
+    if fold <= 0:
+        return lines, 0
+    hidden = max(0, len(lines) - fold)
+    return (lines if open_now or not hidden else lines[:fold]), hidden
+
+
+def event_rows(env: Envelope, width: int, me: str,
+               expanded: set[int] | None = None,
+               fold: int = FOLD_LINES,
+               with_name: bool = True,
+               theme: dict | None = None) -> list[Row]:
+    """One event as a bubble, sided by who sent it.
+
+    MINE ON THE RIGHT AND EVERYONE ELSE'S ON THE LEFT, with a gap on the
+    opposite side: that gap is what makes whose message it is readable without
+    reading the name. The text inside stays left-aligned — a paragraph justified
+    right is unreadable past two lines.
+    """
+    expanded = expanded if expanded is not None else set()
+    T = theme or _current_theme()
+    seq = int(getattr(env, "seq", 0) or 0)
+    speaker = env.sender or "?"
+    estrecho = int(T["narrow_at"])
+    # When narrow nobody goes right: there is no room for the gap that makes
+    # the distinction readable, and without it all you get is text out of place.
+    mine = (_is_mine(speaker, me) and width >= estrecho
+            and T["own_side"] == "right")
+    clock = local_clock(env.ts)
+    pair = _theme_colour(T["header"], speaker)
+    border = _theme_colour(T["frame"], speaker)
+    cuerpo_pair = _theme_colour(T["text"], speaker)
+    tl, tr, bl, br, h, v = (list(str(T["chars"])) + list("╭╮╰╯─│"))[:6]
+
+    # --- system events: one centred line, no bubble -------------------------
+    if env.kind in _SYSTEM:
+        text = f"— {speaker} {' '.join(_body_lines(env, max(width - 20, 20)))} —"
+        # With «…», not cut dead: at 60 columns it ate the end of the focus of
+        # the session without a word, and that is where people say what they
+        # are working on.
+        text = _clip(text, width)
+        pad = " " * max(0, (width - len(text)) // 2)
+        return [Row(pad + text, C_DIM, curses.A_DIM, seq, False)]
+
+    # --- bubble ------------------------------------------------------------
+    # The floor of 28 must NOT override the pane: between 24 and 37 columns
+    # —widths `draw()` does render— the bubble came out at 28 and overflowed. A
+    # minimum that ignores the maximum stops being a minimum and becomes a bug.
+    # NARROW MODE: below NARROW_AT the pane has no room for two-sided
+    # colours on two sides. The right-hand indent eats the width exactly
+    # when there is least to spare, and a message broken into twelve-character
+    # scraps does not read. So it takes ALL the width and everything goes left:
+    # who is speaking is still known from the name and the frame colour.
+    if width < estrecho:
+        bubble = width
+    else:
+        # SIX IS THE REAL FLOOR, whatever the theme asks for: two strokes,
+        # two spaces and one column of text. `bubble_share: 0.05` with
+        # `bubble_min: 4` —both at the exact minimum of their documented
+        # range— left inner = 0, and a _wrap of zero width returns the text
+        # unwrapped: a body two columns wide inside a box of four, on every
+        # pane between 56 and 99 columns. Neither setting breaks alone.
+        floor = min(max(int(T["bubble_min"]), 6), width)
+        cap = max(BUBBLE_MAX_MIN,
+                   int(_screen_width(width) * float(T["bubble_max_share"])))
+        bubble = min(width, max(floor, min(cap,
+                                            int(width * float(T["bubble_share"])))))
+    inner = max(1, bubble - 4)              # two borders and a space each side
+    lines = _body_lines(env, inner)
+
+    open_now = seq in expanded
+    shown, hidden = _fold_lines_to(lines, fold, open_now)
+    if hidden:
+        plural = "line" if hidden == 1 else "lines"
+        shown = shown + [("▾ show less" if open_now
+                          else f"▸ show more ({hidden} {plural})")]
+
+    # THE HEADER HAS TO FIT, and the header is the stamp plus the separator
+    # plus the name. This asked for `len(clock) + 6` — the SHORT clock, five
+    # characters — while what gets printed is _stamp(), which is twelve for a
+    # message that is not from today. On an eighty-column terminal the box came
+    # out thirteen wide and «28 ago 13:38 · alice» was clipped to «28 ago 13:38…»:
+    # who spoke was unreadable, with seventy-nine columns free.
+    cabecera_min = _w(_stamp(env.ts)) + _w(HEADER_SEPARATOR) + _w(speaker) + 6
+    box_width = min(bubble, max([_w(x) for x in shown] + [cabecera_min]) + 4)
+    left = " " * max(0, width - box_width) if mine else ""
+    rows: list[Row] = []
+
+    # THE HEADER: STAMP FIRST, NAME AFTER, on one line.
+    #
+    # The time used to live on the bottom edge of the bubble. It looks good
+    # there and makes you drop your eyes to the end of a forty-line message to
+    # find out when it was said.
+    #
+    # And on a GROUPED message — from whoever just spoke — only the stamp
+    # shows: the name is already above, the time is not, and without it a group
+    # of five messages read as one stretched out over an hour.
+    #
+    # Clipped against the BUBBLE and against the PANE: an 80-character name
+    # came out whole over a box of 41 and left the block stepped.
+    stamp = _stamp(env.ts)
+    cabecera = f"{stamp} {HEADER_SEPARATOR} {speaker}" if with_name else stamp
+    cabecera = _clip(cabecera, max(1, min(box_width - 2, width - 2)))
+    line = (_pad("", box_width - _w(cabecera)) + cabecera if mine
+             else "  " + cabecera)
+    rows.append(Row(left + line, pair, curses.A_BOLD, seq, False))
+
+    # THE FRAME IN WHITE, not in the speaker's colour: the border is structure,
+    # and tinting it competed with the colours that do mean something — the
+    # red of an error, the green of a ✓. Who is speaking is already clear from
+    # the side and from the name.
+    rows.append(Row(left + tl + h * (box_width - 2) + tr, border, 0, seq,
+                    False, border))
+    for i, line in enumerate(shown):
+        is_button = hidden and i == len(shown) - 1
+        # CLIP HERE AND NOT EARLIER. The button line does not go through
+        # _wrap — it is added afterwards — so in a narrow bubble it ran off the
+        # right: «▸ show more (1 line)» measures 19 and the box measured 10. And
+        # even when _wrap is right, this cut is the last word: NO line may be
+        # wider than the inside of its own box.
+        body = f"{v} {_pad(_clip(line, box_width - 4), box_width - 4)} {v}"
+        # WHITE by default, and colour only when the line says something. The
+        # fallback used to be the speaker's colour, so the WHOLE body came out
+        # tinted and the green of a ✓ stood out against nothing.
+        if is_button:
+            tone = C_BUTTON
+        elif T["tones"]:
+            tone = line_pair(line) or cuerpo_pair
+        else:
+            tone = cuerpo_pair
+        rows.append(Row(left + body, tone,
+                        curses.A_BOLD if is_button else 0, seq, bool(is_button),
+                        border))
+    # The floor, now without the time: it moved up to the header row.
+    # No A_DIM: the roof was painted at full intensity and the floor dimmed, so
+    # the same box had two tones of border and looked half drawn. A frame only
+    # reads as a frame when its four sides are the same stroke.
+    rows.append(Row(left + bl + h * (box_width - 2) + br, border,
+                    0, seq, False, border))
+    rows.append(Row("", 0, 0, seq, False))
+    return rows
+
+
+def classic_rows(env: Envelope, width: int, me: str,
+                 expanded: set[int] | None = None,
+                 fold: int = 0,
+                 theme: dict | None = None) -> list[Row]:
+    """The original look: time, name and running text, no bubbles.
+
+    It is `main`'s, with two things the new theme brought that there was no
+    sense keeping from it:
+
+    · YOUR OWN COLOUR GOES ON THE TEXT. There is no frame here to put it on, and
+      a global setting that only works in one theme is not global. Whoever picks
+      a colour picks it to be recognised, not to be recognised in one view.
+    · folding, IF it was asked for. By default this theme does not fold: people
+      who choose the log view usually want it all in front of them.
+    """
+    expanded = expanded if expanded is not None else set()
+    T = theme or _current_theme()
+    seq = int(getattr(env, "seq", 0) or 0)
+    clock = _stamp(env.ts)
+    mark = KIND_MARK.get(env.kind, " ")
+    speaker = env.sender or "?"
+    label = f"{speaker}{' (you)' if _is_mine(speaker, me) else ''}"
+    head = f"{clock} {HEADER_SEPARATOR} {label:>14.14} {mark} "
+    # EVERYTHING HERE IN COLUMNS.
+    #
+    # `{label:>14.14}` pads to fourteen CHARACTERS, which is up to twenty-eight
+    # columns for a name in Japanese. The continuation indent was built from
+    # len(head), so it landed three to eight columns short of where the first
+    # line's text starts, and body_width was computed too generous by the same
+    # amount — so line one was built wider than the pane and the terminal threw
+    # away the overflow.
+    ancho_head = _w(head)
+    indent = " " * ancho_head
+
+    # AND THE HEADER CAN BE WIDER THAN THE PANE. It is twenty-five columns for
+    # any ASCII name, and draw() renders panes from twenty-four: between 24 and
+    # 26 the body had nowhere to go and the message was INVISIBLE — header on
+    # screen, text nowhere, no warning. The floor of 20 below could never be
+    # reached because it was a floor on a number that was already negative.
+    #
+    # Under that width the header is dropped to its first line and the body
+    # runs full width underneath: unusual-looking, but readable, which is the
+    # only thing that matters at twenty-four columns.
+    apretado = ancho_head + 8 > width
+    if apretado:
+        indent = ""
+    body_width = max(width - (0 if apretado else ancho_head) - 1, 8)
+
+    lines = _body_lines(env, body_width)
+    open_now = seq in expanded
+    shown, hidden = _fold_lines_to(lines, fold, open_now)
+
+    pair = _theme_colour(T["header"], speaker)
+    text = _theme_colour(T["text"], speaker)
+    dim = curses.A_DIM if env.kind in (KIND_PRESENCE, KIND_HELLO) else 0
+
+    def _tono(line: str) -> int:
+        return (line_pair(line) or text) if T["tones"] else text
+
+    primera = shown[0] if shown else ""
+    if apretado:
+        # The header on its own line, then the text with nothing in front of it.
+        rows = [Row(_clip(head, width), pair, dim, seq, False, pair)]
+        if primera:
+            rows.append(Row(_clip(primera, width), _tono(primera), dim, seq,
+                            False, pair))
+    else:
+        rows = [Row(head + primera, _tono(primera), dim, seq, False, pair)]
+    for extra in shown[1:]:
+        rows.append(Row(indent + extra, _tono(extra), dim, seq, False, pair))
+    if hidden:
+        plural = "line" if hidden == 1 else "lines"
+        label = ("▾ show less" if open_now
+                    else f"▸ show more ({hidden} {plural})")
+        rows.append(Row(indent + label, C_BUTTON, curses.A_BOLD, seq, True,
+                        pair))
+    return rows
+
+
+def my_names(session: str) -> list[str]:
+    """Every name I can appear signing under.
+
+    THIS session's is not enough. If the hub suffixes you over a name clash —or
+    you join under another because yours is taken— your older messages are still
+    signed with the usual one. The global name is the one that does not change
+    because the hub has a problem, so both count.
+
+    It exists as a list and not as a comparison because TWO things depend on it:
+    which side a message aligns to, and what colour it comes out. They were
+    written separately, one was fixed and the other stayed broken — your global
+    colour did not show on your own messages and it looked as though the setting
+    did nothing.
+    """
+    out = [session] if session else []
+    try:
+        own = resolve_name()
+    except Exception:                                    # noqa: BLE001
+        own = None
+    # The session name is always mine — the hub handed it to me. The global one
+    # is mine only while nobody else is using it: it differs from the session
+    # name exactly when the hub had to suffix me, and it had to suffix me
+    # because somebody else was already there.
+    if own and own not in out and own not in _OTHERS:
+        out.append(own)
+    return out
+
+
+def _is_mine(name: str, me: str) -> bool:
+    """Is this message mine?"""
+    return bool(name) and name in my_names(me)
+
+
+def conversation_rows(events, width: int, me: str,
+
+                      expanded: set[int] | None = None,
+                      fold: int = FOLD_LINES) -> list[Row]:
+    """The whole conversation, grouped the way a messaging app would group it.
+
+    TWO THINGS THAT MAKE THE DIFFERENCE and cannot be decided from one message
+    alone, which is why this exists apart from `event_rows`:
+
+    · the name repeats ONLY when the speaker changes. Repeating it on every
+      message is what makes a conversation look like a log.
+    · a separator when the day changes, with «today» and «yesterday» spelled
+      out, so nobody has to subtract dates.
+    """
+    # THE THEME IS READ HERE, on every refresh, not at start-up: a
+    # `collab theme classic` lands on the next redraw without restarting the
+    # viewer. Read once, changing theme would mean closing it, and whoever
+    # tried would think the command does nothing.
+    T = _current_theme()
+    fold = int(T["fold"])
+    # BY THE LAYOUT IT DECLARES, not by what it is called. With `if theme ==
+    # "classic"` any user theme extending classic came out in bubbles: it
+    # inherited everything except the one thing that was actually checked.
+    if T["layout"] == "log":
+        rows: list[Row] = []
+        for env in events:
+            rows.extend(classic_rows(env, width, me, expanded, fold, T))
+        return rows
+
+    rows: list[Row] = []
+    last_speaker = None
+    last_day = None
+    for env in events:
+        day = _day(env.ts)
+        if T["day_separators"] and day and day != last_day:
+            label = f" {_day_label(env.ts)} "
+            side = max(0, (width - len(label)) // 2)
+            rows.append(Row(_H * side + label + _H * side, C_DIM,
+                            curses.A_DIM, 0, False))
+            last_day, last_speaker = day, None
+        if env.kind in _SYSTEM:
+            rows.extend(event_rows(env, width, me, expanded, fold, theme=T))
+            last_speaker = None
+            continue
+        show_name = (env.sender != last_speaker) if T["group_by_author"] else True
+        rows.extend(event_rows(env, width, me, expanded, fold,
+                               with_name=show_name, theme=T))
+        last_speaker = env.sender
     return rows
 
 
@@ -327,16 +1192,38 @@ def roster_rows(model: Model, width: int) -> list[Row]:
         if not online and (seen := ago(person.get("last_seen"))):
             state = f"offline · last seen {seen}"
 
-        head = f" {glyph} {name}{suffix}"
-        pad = max(28 - len(head), 1)
+        # THE PERSON'S COLOUR ON THE DOT AND THE NAME, the neutral one on the
+        # state. The colour is what tells people apart at a glance, and the list
+        # of people is the one place that is entirely about telling them apart —
+        # it identified them everywhere except there.
+        #
+        # The state keeps its own green/grey: whether someone is here is not a
+        # matter of who they are, and a dot that carried both meanings would
+        # tell you neither.
+        who = f" {glyph} {name}{suffix}"
+        head = who
+        # COLUMNS, not characters. A name in Japanese costs two columns per
+        # glyph, so `28 - len(head)` left the state word starting at column 28,
+        # 31 or 32 depending on whose name it was — a column that is meant to
+        # line up and did not. Measured: 28 / 32 / 31 / 28 for four names.
+        pad = max(28 - _w(head), 1)
         head += " " * pad + state
         if (focus := person.get("focus") or ""):
             head += f"  {focus}"
-        rows.append(Row(head[:width], C_ONLINE if online else C_OFFLINE,
-                        curses.A_BOLD if online else curses.A_DIM))
+        colour = _speaker_pair(name)
+        # And clipped by columns too: `head[:width]` cut by characters, so a row
+        # with a wide name was built wider than the pane and the terminal
+        # dropped whatever hung over — the state word, usually.
+        rows.append(Row(_clip(head, width), C_ONLINE if online else C_OFFLINE,
+                        curses.A_BOLD if online else curses.A_DIM,
+                        edge=colour, head=min(len(who), width)))
 
+        # The description line too, dimmed: it belongs to that person, and at a
+        # glance the two lines read as one block rather than as two entries.
         detail = stat_line(person) or "nothing shared yet"
-        rows.append(Row(f"     {detail}"[:width], C_DIM, curses.A_DIM))
+        line = f"     {detail}"[:width]
+        rows.append(Row(line, C_DIM, curses.A_DIM,
+                        edge=colour, head=len(line)))
     if not rows:
         rows.append(Row("  (waiting for the roster…)", C_DIM, curses.A_DIM))
     return rows
@@ -359,8 +1246,16 @@ class Tui:
         self.roster = Pane(follow=False)
         self.chat = Pane()
         self.focus = "roster" if self.view == "roster" else "chat"
-        #: Where the conversation starts, so the wheel can tell the panes apart.
+        #: Messages unfolded by hand. Empty = everything folded.
+        self.expanded: set[int] = set()
+        #: Where the conversation starts on screen and which rows are showing.
+        #: Filled by draw() and read by the click handler; it also lets the
+        #: wheel tell the panes apart.
         self._chat_top = 0
+        self._chat_rows: list[Row] = []
+        #: The theme the rows on screen were built with, so a change can be
+        #: noticed and the reader's place kept across it.
+        self._theme_drawn: str = ""
 
     # -- drawing ------------------------------------------------------------
 
@@ -374,6 +1269,41 @@ class Tui:
             attr = curses.color_pair(C_ACCENT) | (curses.A_BOLD if focused else 0)
             text = f" {label} "
             win.addnstr(y, 2, text, max(width - 4, 0), attr)
+
+
+    def _paint_row(self, win, y: int, row: "Row", width: int) -> None:
+        """Paint one row, then repaint the parts that carry a second colour.
+
+        The body takes the colour of what the line SAYS —red on a failure, green
+        on a pass— and the `│` live inside that same string. They are repainted
+        with `row.edge`, the colour of WHO SENT IT: so the frame identifies the
+        sender at a glance and the inside is free to say how it went. Two
+        different pieces of information in two different places.
+
+        `row.head` does the same for the roster, where the dot and the name take
+        the person's colour and the state keeps its own.
+        """
+        try:
+            win.addnstr(y, 0, row.text or " ", width, curses.color_pair(row.pair)
+                        | row.attr)
+        except curses.error:
+            return
+        if row.head and row.edge:
+            try:
+                win.addnstr(y, 0, row.text[:row.head],
+                            min(row.head, width),
+                            curses.color_pair(row.edge) | row.attr)
+            except curses.error:
+                pass
+        if not row.text or row.text.lstrip()[:1] != _V:
+            return
+        marco = curses.color_pair(row.edge or C_TEXT)
+        for col in (row.text.find(_V), row.text.rfind(_V)):
+            if 0 <= col < width:
+                try:
+                    win.addnstr(y, col, _V, 1, marco)
+                except curses.error:
+                    pass
 
     def draw(self, win) -> None:
         win.erase()
@@ -453,27 +1383,42 @@ class Tui:
             idx = self.roster.offset + i
             if idx >= len(rows):
                 break
-            r = rows[idx]
-            win.addnstr(body_top + 1 + i, 0, r.text, width - 1,
-                        curses.color_pair(r.pair) | r.attr)
+            # Through _paint_row like the conversation, and not with a bare
+            # addnstr: the roster rows carry a head in the person's own colour,
+            # and painting them here by hand meant that colour was computed and
+            # then thrown away — the split view showed none of it while the
+            # roster-only view did.
+            self._paint_row(win, body_top + 1 + i, rows[idx], width - 1)
 
         chat_top = body_top + roster_h
         self._chat_top = chat_top
         self._hline(win, chat_top, width, "CONVERSATION")
 
-        chat_rows: list[Row] = []
-        for env in self.model.events:
-            chat_rows.extend(event_rows(env, width - 1, self.model.profile.name))
+        # WHERE WE WERE, IN MESSAGES, BEFORE THE ROWS ARE REBUILT. Taken from
+        # the rows that are on screen right now, because after the rebuild the
+        # offset may point at a different message entirely.
+        antes = self.chat.top_seq(self._chat_rows) if self._chat_rows else 0
+        tema_antes = self._theme_drawn
+
+        chat_rows = conversation_rows(self.model.events, width - 1,
+                                      self.model.profile.name, self.expanded)
+        self._chat_top = chat_top + 1
+        self._chat_rows = chat_rows
         self.chat.rows = height - chat_top - 2
         self.chat.total = len(chat_rows)
         self.chat.settle()
+
+        # A theme change moves every row. Put the message you were reading back
+        # under your eyes instead of leaving the offset pointing at whatever
+        # now happens to live at that row number.
+        self._theme_drawn = theme()
+        if tema_antes and self._theme_drawn != tema_antes:
+            self.chat.hold(antes, chat_rows)
         for i in range(self.chat.rows):
             idx = self.chat.offset + i
             if idx >= len(chat_rows):
                 break
-            r = chat_rows[idx]
-            win.addnstr(chat_top + 1 + i, 0, r.text, width - 1,
-                        curses.color_pair(r.pair) | r.attr)
+            self._paint_row(win, chat_top + 1 + i, chat_rows[idx], width - 1)
 
         # --- help ----------------------------------------------------------
         hint = " wheel/tab: pane · ↑↓ pgup/pgdn: scroll · [ ]: roster · g/G: top/end · q: quit "
@@ -538,6 +1483,9 @@ class Tui:
         # replies — so quitting on it makes the view close itself at random.
         if key in (ord("q"), ord("Q")):
             return False
+        if key == curses.KEY_MOUSE:
+            self._mouse()
+            return True
         if key == ord("\t"):
             self.focus = "roster" if self.focus == "chat" else "chat"
         elif key in (curses.KEY_UP, ord("k")):
@@ -560,6 +1508,36 @@ class Tui:
             self.roster.scroll(1)
         return True
 
+    def _mouse(self) -> None:
+        """Wheel and click over the conversation.
+
+        A click on the button row folds or unfolds THAT message. In
+        cualquier otra row no hace nada: el raton no debe mover el foco ni
+        seleccionar por accidente mientras se lee.
+        """
+        try:
+            _id, _x, y, _z, state = curses.getmouse()
+        except curses.error:
+            return
+        if state & curses.BUTTON4_PRESSED:
+            self.chat.scroll(-3)
+            return
+        if state & getattr(curses, "BUTTON5_PRESSED", 0):
+            self.chat.scroll(3)
+            return
+        if not (state & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)):
+            return
+        idx = self.chat.offset + (y - self._chat_top)
+        if not (0 <= idx < len(self._chat_rows)):
+            return
+        row = self._chat_rows[idx]
+        if not row.button or not row.seq:
+            return
+        self.expanded.symmetric_difference_update({row.seq})
+        # Unfolding makes the conversation longer below: if we were following
+        # the bottom, we stay at the bottom and do not end up halfway up.
+        self.chat.settle()
+
     # -- single-pane views ---------------------------------------------------
 
     def _draw_single(self, win, height: int, width: int) -> None:
@@ -570,10 +1548,11 @@ class Tui:
             rows = roster_rows(m, width - 1)
             pane, label = self.roster, f"PARTICIPANTS ({len(people)})"
         else:
-            rows = []
-            for env in m.events:
-                rows.extend(event_rows(env, width - 1, m.profile.name))
+            rows = conversation_rows(m.events, width - 1, m.profile.name,
+                                     self.expanded)
             pane, label = self.chat, "CONVERSATION"
+            self._chat_top = 1
+            self._chat_rows = rows
 
         state = str(m.status.get("state") or "?")
         state_pair = {"live": C_ONLINE, "reconnecting": C_WARN}.get(state, C_OFFLINE)
@@ -593,9 +1572,7 @@ class Tui:
             idx = pane.offset + i
             if idx >= len(rows):
                 break
-            r = rows[idx]
-            win.addnstr(1 + i, 0, r.text, width - 1,
-                        curses.color_pair(r.pair) | r.attr)
+            self._paint_row(win, 1 + i, rows[idx], width - 1)
 
         hint = " wheel · ↑↓ pgup/pgdn: scroll · g/G: top/end · q: quit "
         win.addnstr(height - 1, 0, hint[:width - 1], width - 1,
@@ -611,16 +1588,44 @@ def _init_colors() -> None:
     curses.init_pair(C_OFFLINE, curses.COLOR_RED, -1)
     curses.init_pair(C_ACCENT, curses.COLOR_CYAN, -1)
     curses.init_pair(C_WARN, curses.COLOR_YELLOW, -1)
+    curses.init_pair(C_GOOD, curses.COLOR_GREEN, -1)
+    curses.init_pair(C_BAD, curses.COLOR_RED, -1)
+    curses.init_pair(C_WARNLINE, curses.COLOR_YELLOW, -1)
+    curses.init_pair(C_INFO, curses.COLOR_BLUE, -1)
+    curses.init_pair(C_TEXT, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_BUTTON, curses.COLOR_YELLOW, -1)
+    _deal_colours(curses.COLORS)
     for i, colour in enumerate(SPEAKER_COLORS):
         curses.init_pair(C_SPEAKER_BASE + i, colour, -1)
 
 
 def run(profile: SessionProfile, view: str = "both") -> int:
+    # MI PROPIO COLOR, DE LA CONFIG LOCAL, ANTES DE MIRAR EL ROSTER.
+    #
+    # Chosen colours arrive through the roster, which comes from the hub. Mine
+    # does too — but only AFTER publishing it, and until then I saw myself in
+    # a random colour on my own screen. You set your colour, open the chat and
+    # it is not there: no way to tell whether it failed to save, failed to
+    # travel, or the viewer ignores it. It is seeded here and the roster wins
+    # afterwards,
+    # which is right — what is published is the truth for everyone, me included.
+    mine = default_color()
+    if mine not in (None, ""):
+        record_colours([{"name": n, "color": mine}
+                          for n in my_names(profile.name)])
     model = Model(profile=profile)
     model.load_initial()
     tui = Tui(model, view=view)
 
     def loop(win) -> int:
+        # The mouse, for the «show more» button and the wheel. mouseinterval(0)
+        # delivers the click on press instead of waiting for a double click,
+        # which feels like an odd lag on a button.
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+            curses.mouseinterval(0)
+        except curses.error:
+            pass
         _init_colors()
         try:
             curses.curs_set(0)

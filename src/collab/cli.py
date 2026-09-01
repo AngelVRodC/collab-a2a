@@ -12,6 +12,8 @@ import argparse
 import json
 import os
 import shutil
+
+import re
 import subprocess
 import sys
 import time
@@ -32,8 +34,11 @@ from .config import (
     collab_executable,
     collab_home,
     ensure_home,
+    GITIGNORE_BODY,
     repo_root,
     resolve_name,
+    sibling_homes,
+    _slug,
     set_default_name,
     save_watch_settings,
     set_share_stats,
@@ -41,6 +46,12 @@ from .config import (
     share_stats_enabled,
     stats_source,
     watch_settings,
+    default_color,
+    parse_color,
+    set_default_color,
+    theme_names,
+    set_theme,
+    theme,
 )
 from .client.context import gather as ctx_gather
 from .protocol import (DEFAULT_ROOM, MAX_FILE_BYTES, Envelope, KIND_CHAT,
@@ -526,6 +537,30 @@ def _home_from(given: str) -> Path:
         return value.resolve()
     return base_home().parent / given
 
+def _which_agent_to_join(args: argparse.Namespace):
+    """Which agent joins: the one asked for, the only one, or the one picked.
+
+    Returns a Path to use, None to fall through to the usual behaviour, or
+    False to stop.
+
+    Only the agents created on purpose count — a `.collab-x` left by an earlier
+    collision is state, not a choice somebody made — so the shared directory is
+    not offered when a real agent exists, and nothing is asked at all when only
+    it does.
+    """
+    from . import identity as ident
+
+    if getattr(args, "name", "") or os.environ.get("COLLAB_HOME"):
+        return None                       # already said who they are
+
+    named = [h for h in _agent_homes() if ident.agent_slug(h)]
+    if not named:
+        return None                       # nothing created here; carry on
+
+    picked = _which_agent(args, "join", "join <url>", homes=named,
+                          question="join as which agent?")
+    return picked if picked is not None else False
+
 
 def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
     """Point this agent at its own state when the repo's default is taken.
@@ -547,6 +582,18 @@ def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
             print(dim(f"       later commands need COLLAB_HOME={chosen}"
                       f" — or name it {COLLAB_DIRNAME}-<something> and they"
                       " will find it"))
+        return None
+
+    # WHICH AGENT IS JOINING is a decision when there is more than one here,
+    # and it decides the name, the colour and the id that everybody else in the
+    # session sees. Guessing it is worse than guessing where to write a colour,
+    # because the wrong answer is visible to other people rather than only to
+    # you.
+    chosen = _which_agent_to_join(args)
+    if chosen is False:
+        return 2
+    if chosen is not None:
+        os.environ["COLLAB_HOME"] = str(chosen)
         return None
 
     base = base_home()
@@ -574,6 +621,45 @@ def _state_dir_note(profile: SessionProfile) -> None:
         return
     print(dim(f"       later commands here find {home.name} on their own;"
               f" force it with COLLAB_HOME={home}"))
+
+    # The worktree was made and the join still failed. If a lock is what sent
+    # us here and the session behind it does not answer, that is the one
+    # ambiguity worth a question.
+    if lock is not None and lock.held and not _reachable(lock.url):
+        if not _lock_says_here_but_nothing_answers(lock):
+            return completed.returncode
+        lockfile.release()
+        ok("lock cleared — hosting here instead, as asked")
+        return cmd_host(_host_args_from(args))
+    return completed.returncode
+def _publish_global_settings(profile: SessionProfile) -> None:
+    """Publish what you already had set, as soon as there is a session to take it.
+
+    `collab color` with no session promises it "will be published when you
+    join". That used not to happen: the colour stayed on disk and everyone else
+    saw you in the dealt colour until you ran the command again from inside.
+    Whoever set it once takes it as done, and nothing on screen says otherwise.
+
+    It is the only thing published. Your colour is the one preference OTHER
+    people need in order to paint you; the theme and the folding decide how YOU
+    read the conversation, and sending those to anyone would be telling them how
+    to look at their own screen.
+
+    A failure here is silent and does not break the join: you have just arrived,
+    and a warning about a colour would be noise in front of what matters. The
+    daemon retries on reconnect.
+    """
+    from . import identity as ident
+
+    payload = {}
+    color = default_color()
+    if color not in (None, ""):
+        payload["color"] = str(color)
+    try:
+        with _client(profile) as client:
+            client.report_stats({}, identity=payload)
+    except Exception:                                     # noqa: BLE001
+        pass
 
 
 def cmd_join(args: argparse.Namespace) -> int:
@@ -663,6 +749,7 @@ def cmd_join(args: argparse.Namespace) -> int:
     # The snapshot in the join response predates our own feed connecting, so it
     # would show us as offline. Re-read it now that we are live.
     if status.get("state") == "live":
+        _publish_global_settings(profile)
         try:
             with _client(profile) as client:
                 fresh = client.snapshot()
@@ -1371,12 +1458,576 @@ def cmd_kick(args: argparse.Namespace) -> int:
     return 0
 
 
+#: The variables a theme can use. Listed by `collab theme` because whoever is
+#: about to write one needs them without reading the source.
+_VARS_DOC = ("$DEFAULT_COLOR", "$SPEAKER", "$TEXT", "$GOOD", "$BAD", "$WARN",
+             "$INFO", "$DIM")
+
+
+def cmd_theme(args: argparse.Namespace) -> int:
+    """Choose how the conversation looks.
+
+    `chat`    bubbles, sided by who is speaking, each person's colour on the
+              frame. Groups consecutive messages and separates days.
+    `classic` the original view: time, name and running text, each person's
+              colour on the TEXT. Denser, and what you want when you read the
+              session as a record rather than as a conversation.
+
+    Global stays global: your colour and your folding are honoured in both, each
+    in the place that theme can show them.
+    """
+    from . import themes as _themes
+
+    if getattr(args, "new", None):
+        return _create_theme(args.new, getattr(args, "desde", None))
+
+    if getattr(args, "check", False):
+        return _check_themes()
+
+    md, _ = _themes.load_md_themes()
+    warnings = _themes.all_warnings()
+    folder = _themes.user_themes_dir()
+
+    if not args.value:
+        current = theme()
+        for t in theme_names():
+            mark = "→" if t == current else " "
+            origin = dim(f"  {t}.md") if t in md else dim("  built in")
+            print(f"  {mark} {t}{origin}")
+
+        print(dim(f"\n  your themes live in {folder}/"))
+        if not md:
+            print(dim("  none yet — to start one:"))
+            print(dim("    collab theme --new my-theme"))
+        for a in warnings:
+            warn(a)
+        if not args.list:
+            print(dim("  variables: " + " ".join(sorted(_VARS_DOC))))
+        return 0
+
+    chosen = set_theme(args.value)
+    if chosen is None:
+        fail(f"no theme called {args.value!r}")
+        print("  available: " + " · ".join(theme_names()))
+        for a in warnings:
+            warn(a)
+        return 2
+    # STORED IN THE GLOBAL CONFIG, not in the session: a theme is how YOU read
+    # the conversation, and there is no reason for it to drop back to the
+    # built-in every time you join a new one.
+    ok(f"theme {c(chosen, '1')} — applies on the next redraw, here and in "
+       f"any pane you have open")
+    if chosen in md:
+        print(dim(f"  from {folder / (chosen + '.md')}"))
+    for a in warnings:
+        warn(a)
+    return 0
+
+
+def _check_themes() -> int:
+    """Name everything mis-written, and fail if there is any.
+
+    It exists because three docstrings cited it as the place theme typos get
+    reported and the command did not exist: `collab theme --check` answered
+    "unrecognized arguments". A promise the documentation makes and the program
+    does not keep is worse than documenting nothing.
+
+    Returns 1 when there are warnings so it works in a script — anyone keeping
+    their themes in a repo can check them before pushing.
+    """
+    from . import themes as _themes
+
+    warnings = _themes.all_warnings()
+    folder = _themes.user_themes_dir()
+    md, _ = _themes.load_md_themes()
+
+    print(dim(f"  {len(md)} theme(s) in {folder}/"))
+    for a in warnings:
+        warn(a)
+    if not warnings:
+        ok("no problems found")
+        return 0
+    fail(f"{len(warnings)} problem(s) — those settings fall back to the default")
+    return 1
+
+
+def _create_theme(name: str, desde: str | None = None) -> int:
+    """Write a new .md, ready to edit and already working.
+
+    The template carries a theme you can see rather than an empty file: you put
+    it on, you see the effect, and you read the documentation afterwards instead
+    of before.
+    """
+    from . import themes as _themes
+
+    cleaned = re.sub(r"[^\w.-]+", "-", (name or "").strip().lower()).strip("-")
+    if not cleaned:
+        fail("give it a name: collab theme --new my-theme")
+        return 2
+
+    folder = _themes.user_themes_dir()
+    destino = folder / f"{cleaned}.md"
+    if destino.exists():
+        # NEVER overwritten without being asked: a theme somebody has spent
+        # weeks tuning cannot be lost to a repeated command.
+        fail(f"{destino} already exists")
+        print(dim("  edit that one, or pick another name"))
+        return 2
+
+    # IT STARTS FROM A THEME THAT EXISTS — the one asked for, or the one you
+    # have on. Starting from the values you are looking at right now is far more
+    # use than starting from defaults you have never seen.
+    base_nombre = (desde or theme()).strip().lower()
+    if base_nombre not in _themes.all_themes():
+        fail(f"no theme called {base_nombre!r} to start from")
+        print("  available: " + " · ".join(theme_names()))
+        return 2
+    base = _themes.resolve(base_nombre)
+
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        destino.write_text(_themes.template(cleaned, base), encoding="utf-8")
+    except OSError as exc:
+        fail(f"cannot write {destino} ({exc})")
+        return 1
+
+    ok(f"created {c(str(destino), '36')}")
+    print(dim(f"  a copy of {base_nombre}, with every setting written out"))
+    print(dim(f"  edit it, then try it with:  collab theme {cleaned}"))
+    return 0
+
+
+def _agent_homes() -> "list[Path]":
+    """Every state directory in this repo, shared one first."""
+    out, seen = [], set()
+    for h in [base_home()] + list(sibling_homes()):
+        if h.exists() and str(h) not in seen:
+            seen.add(str(h))
+            out.append(h)
+    return out
+
+
+def _describe_home(home: "Path") -> str:
+    """`.collab-alice  alice · #00cccc` — enough to choose by."""
+    from . import identity as ident
+
+    try:
+        data = ident.load(home)
+    except Exception:                                     # noqa: BLE001
+        data = {}
+    slug = ident.agent_slug(home)
+    name = str(data.get("name") or slug or "")
+    label = name or "shared"
+    colour = data.get("color")
+    return f"{home.name}  {label}" + (f" · {colour}" if colour else "")
+
+
+def _which_agent(args: argparse.Namespace, what: str,
+                 command: str = "", homes: "list[Path] | None" = None,
+                 question: str = "") -> "Path | None":
+    """Which directory this belongs to. Asks rather than guesses.
+
+    COLLAB_HOME and --agent are explicit and are taken as given. One directory
+    is not a choice. Beyond that there is a person at the keyboard, three lines
+    of options, and a wrong guess writes into somebody else's settings — so it
+    asks.
+
+    Returns None when it cannot be decided, and the caller stops. Refusing is
+    the point: a script with nobody to ask is exactly the case where guessing
+    caused the problem.
+
+    `homes` narrows the candidates — joining only offers agents somebody
+    created on purpose.
+    """
+    from . import identity as ident
+
+    if homes is None:
+        if os.environ.get("COLLAB_HOME"):
+            return collab_home()
+        homes = _agent_homes()
+
+    wanted = (getattr(args, "agent", "") or "").strip()
+    if wanted:
+        # BY DIRECTORY NAME OR BY AGENT NAME. People type whichever they last
+        # read on screen, and both are on screen.
+        for h in homes:
+            if h.name == wanted or ident.agent_slug(h) == wanted:
+                return h
+        fail(f"no agent here called {wanted!r}")
+        for h in homes:
+            print(dim(f"    {_describe_home(h)}"))
+        print(dim(f"\n  create it with:  collab agent create {_slug(wanted)}"))
+        return None
+
+    if len(homes) <= 1:
+        return homes[0] if homes else collab_home()
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # Nobody to ask. Guessing is what this exists to stop.
+        fail(f"there are {len(homes)} agents here — say which one owns {what}")
+        for h in homes:
+            print(dim(f"    {_describe_home(h)}"))
+        print(dim(f"\n  collab {command or what} … --agent <name>"))
+        print(dim("  or set COLLAB_HOME to the directory you mean"))
+        return None
+
+    heading(question or f"which agent owns this {what}?")
+    for i, h in enumerate(homes, 1):
+        print(f"  {i}. {_describe_home(h)}")
+    try:
+        answer = input(f"\n  1-{len(homes)} (anything else cancels): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not answer.isdigit() or not 1 <= int(answer) <= len(homes):
+        print(dim("  cancelled — nothing was changed"))
+        return None
+    return homes[int(answer) - 1]
+
+
+def _agent_dir_for(name: str) -> "Path":
+    """Where an agent by this name lives, whether or not it exists yet."""
+    return agent_home(_slug(name))
+
+
+def _is_busy(home: "Path") -> "object | None":
+    """The live lock on a directory, or None. A held lock means processes."""
+    lock = lockfile.read(home)
+    return lock if (lock is not None and lock.held) else None
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    """Create, update, delete and list the agents living in this repo.
+
+    An agent is a state directory: `.collab-alice` beside `.collab`. What two
+    agents in one checkout collide over is collab's state — one profile, one
+    listener, one inbox, one lock — and that is the only thing separated. The
+    files they are working on stay shared, which is the point of them being
+    here together.
+    """
+    from . import identity as ident
+
+    action = args.action
+    if action == "list":
+        return _agent_list()
+    if action == "create":
+        return _agent_create(args)
+    if action == "update":
+        return _agent_update(args)
+    if action == "delete":
+        return _agent_delete(args)
+    fail(f"unknown action {action!r}")
+    return 2
+
+
+def _agent_list() -> int:
+    from . import identity as ident
+
+    homes = _agent_homes()
+    # THE SHARED DIRECTORY IS NOT AN AGENT. It exists in every repo that has
+    # ever run collab, so listing it and stopping leaves somebody who has
+    # created none looking at a list with no hint of how to make one.
+    named = [h for h in homes if ident.agent_slug(h)]
+    if not named:
+        heading("agents in this repo")
+        print(dim("  none yet — collab agent create <name>"))
+        if homes:
+            print(dim(f"  ({homes[0].name} is the shared state, not an agent)"))
+        return 0
+    heading(f"agents in this repo ({len(homes)})")
+    current = collab_home()
+    mine = False
+    for h in homes:
+        here = "→" if str(h) == str(current) else " "
+        mine = mine or here == "→"
+        busy = _is_busy(h)
+        line = f"  {here} {_describe_home(h)}"
+        if busy is not None:
+            line += dim("  · in use")
+        print(line)
+    if mine:
+        print(dim("\n  → is the one this command would act as"))
+    else:
+        print(dim(f"\n  none of them: this command would act on {current.name}"))
+    return 0
+
+
+def _agent_create(args: argparse.Namespace) -> int:
+    from . import identity as ident
+
+    if not (args.name or "").strip():
+        fail("give it a name: collab agent create <name>")
+        return 2
+    slug = _slug(args.name)
+    home = _agent_dir_for(slug)
+
+    if home.exists():
+        # Never silently adopt an existing directory: it may hold a live
+        # session, and "create" that quietly means "use" is how somebody ends
+        # up editing an agent they thought they were making.
+        fail(f"{home.name} already exists")
+        print(dim(f"    {_describe_home(home)}"))
+        print(dim(f"  change it with:  collab agent update {slug} …"))
+        return 2
+
+    colour = None
+    if args.color:
+        colour = parse_color(args.color)
+        if colour is None:
+            fail(f"I do not understand the colour {args.color!r}")
+            print(dim("  a hex triplet: #00cccc, or #0cc for short"))
+            print(dim("  a name means a different colour in every tool"
+                      " that keeps a list of them — look the hex up"))
+            return 2
+
+    try:
+        home.mkdir(parents=True)
+        (home / ".gitignore").write_text(GITIGNORE_BODY)
+    except OSError as exc:
+        fail(f"cannot create {home} ({exc})")
+        return 1
+    ident.save(home, name=slug, **({"color": colour} if colour else {}))
+
+    ok(f"created {c(home.name, '36')}")
+    if colour is not None:
+        print(dim(f"  colour  {colour}"))
+    print(dim(f"\n  join as this agent with:  collab join <url> --agent {slug}"))
+    return 0
+
+
+def _agent_update(args: argparse.Namespace) -> int:
+    """Change an existing agent's name or colour.
+
+    Renaming changes the label and not the directory, so the id stays put. That
+    is deliberate: the directory may be holding a live session, and moving it
+    out from under a running daemon to keep a string tidy is a bad trade.
+    """
+    from . import identity as ident
+
+    home = _agent_dir_for(args.name) if args.name else None
+    if home is None or not home.exists():
+        fail(f"no agent here called {(args.name or '')!r}")
+        return _agent_list() or 2
+    if not (args.rename or args.color):
+        fail("nothing to change — pass --rename or --color")
+        return 2
+
+    changes = {}
+    if args.rename:
+        changes["name"] = _slug(args.rename)
+    if args.color:
+        colour = parse_color(args.color)
+        if colour is None and args.color.lower() not in ("none", "-"):
+            fail(f"I do not understand the colour {args.color!r}")
+            return 2
+        changes["color"] = colour
+
+    ident.save(home, **changes)
+    ok(f"updated {c(home.name, '36')}")
+    print(dim(f"    {_describe_home(home)}"))
+    slug = ident.agent_slug(home)
+    if changes.get("name") and changes["name"] != slug:
+        # The directory keeps its name. It may be under a running daemon, and
+        # moving it to keep a label tidy is a bad trade — so say the two
+        # disagree rather than letting somebody find out later.
+        print(dim(f"  the directory stays {home.name}"))
+    return 0
+
+
+def _agent_delete(args: argparse.Namespace) -> int:
+    """Remove an agent's state directory, after asking.
+
+    This is the destructive one. The directory holds a session profile, an
+    inbox and a lock, so: a live lock stops it outright, and a person is asked
+    before anything goes. Without a terminal it refuses unless forced — a
+    script deleting somebody's session state because nobody was there to say no
+    is not a thing to allow by default.
+    """
+    import shutil
+
+    home = _agent_dir_for(args.name) if args.name else None
+    if home is None or not home.exists():
+        fail(f"no agent here called {(args.name or '')!r}")
+        return _agent_list() or 2
+
+    busy = _is_busy(home)
+    if busy is not None:
+        fail(f"{home.name} is in use — {busy.describe()}")
+        print(dim("  stop it first, or the daemon will be writing into a"
+                  " directory that is no longer there"))
+        return 1
+
+    print(f"  {_describe_home(home)}")
+    print(dim(f"  {home}"))
+    if not args.force:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            fail("deleting an agent needs a person, or --force")
+            return 2
+        try:
+            answer = input("\n  delete this agent's state? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 2
+        if answer not in ("y", "yes"):
+            print(dim("  nothing was deleted"))
+            return 2
+
+    try:
+        shutil.rmtree(home)
+    except OSError as exc:
+        fail(f"cannot remove {home} ({exc})")
+        return 1
+    ok(f"deleted {c(home.name, '36')}")
+    print(dim("  the working tree is untouched — only collab's state is gone"))
+    return 0
+
+
+def cmd_whoami(args: argparse.Namespace) -> int:
+    """Who this agent is here: its name, its colour and its directory.
+
+    Worth a command of its own because every one of those can come from a
+    different place, and when two agents share a repo the usual question is not
+    "what is my colour" but "which of us am I".
+    """
+    from . import identity as ident
+
+    home = collab_home()
+    mine = ident.describe(home, resolve_name())
+    heading("collab whoami")
+    print(f"  name    {c(mine['name'] or resolve_name(), '1')}")
+
+    colour = mine["color"] or default_color()
+    if colour in (None, ""):
+        print(dim("  colour  none — one is dealt to you when you join"))
+    else:
+        own = mine["color"] not in (None, "")
+        print(f"  colour  {c(str(colour), '1')}"
+              + dim("  (this agent)" if own else "  (from the global config)"))
+    print(dim(f"  state   {home}"))
+
+    # THE ID FOLLOWS THE DIRECTORY, THE NAME FOLLOWS THE FILE. Usually they
+    # agree and there is nothing to say. When they do not — `collab name bob`
+    # inside `.collab-alice` — reading them one at a time looks like a
+    # contradiction, and working out which half is the stable one should not be
+    # the reader's job.
+    slug = ident.agent_slug(home)
+    if slug and mine["name"] and mine["name"] != slug:
+        print(dim(f"\n  the directory is .collab-{slug}; rename it to"
+                  f" .collab-{mine['name']} if you want the two to match"))
+
+    if not ident.agent_slug(home):
+        print(dim("\n  this is the repo's shared directory, so the name comes"))
+        print(dim("  from the config rather than from the directory itself"))
+
+    print()
+    _agent_list()
+    return 0
+
+
+def cmd_color(args: argparse.Namespace) -> int:
+    """Choose the colour other people see you in, or clear it.
+
+    With no colour of your own the viewer deals one from its palette and does
+    not repeat while any are free. That is enough almost always; this exists for
+    when it is not — being recognised by colour across sessions, or two people
+    who work together not rolling dice for it every time they start.
+
+    It rides in the roster alongside the machine and the repo: declared once,
+    and everyone sees it in their own chat.
+    """
+    if args.value is None:
+        current = default_color()
+        print(current if current is not None
+              else "no colour of your own — the viewer deals you one")
+        print(dim("  a hex triplet: #00cccc, or #0cc for short"))
+        print(dim("  a name means a different colour in every tool"
+                  " that keeps a list of them — look the hex up"))
+        return 0
+
+    if args.value.lower() in ("none", "auto", "-"):
+        from . import identity as ident
+
+        # CLEARING IS A CHANGE. It was writing to the machine's config while
+        # setting wrote to the agent's file, so `collab color none` said ok and
+        # the colour stayed — the agent's own value still won.
+        home = _which_agent(args, "colour", "color")
+        if home is None:
+            return 2
+        if ident.agent_slug(home):
+            ident.save(home, color=None)
+        else:
+            set_default_color(None)
+        ok("your own colour is cleared — the viewer deals you one again")
+        chosen = None
+    else:
+        chosen = parse_color(args.value)
+        if chosen is None:
+            fail(f"I do not understand the colour {args.value!r}")
+            print(dim("  a hex triplet: #00cccc, or #0cc for short"))
+            print(dim("  a name means a different colour in every tool"
+                      " that keeps a list of them — look the hex up"))
+            return 2
+        # WRITTEN WHERE THIS AGENT LIVES, when it has a directory of its
+        # own. Two agents in one repo already keep separate state; writing
+        # both their colours into one file for the whole machine would have
+        # them overwrite each other by turns, and the last to run would win.
+        from . import identity as ident
+
+        home = _which_agent(args, "colour", "color")
+        if home is None:
+            return 2
+        if ident.agent_slug(home):
+            # THE NAME OF THAT DIRECTORY, not of whoever is running this.
+            # With --agent you can write into another agent's file, and
+            # resolve_name() answers for the one holding the terminal — so
+            # setting bob's colour also renamed bob to alice.
+            existing = ident.load(home).get("name")
+            ident.save(home, color=chosen,
+                       name=existing or ident.agent_slug(home) or resolve_name())
+        else:
+            set_default_color(chosen)
+        ok(f"your colour is {c(str(chosen), '1')}")
+
+    # Published NOW, not at the next start: stored only in the config, whoever
+    # is looking at you would keep seeing the old colour with no way to know
+    # why.
+    profile = SessionProfile.current()
+    if profile is None:
+        print("  (no active session: it will be published when you join)")
+        return 0
+    try:
+        with _client(profile) as client:
+            client.report_stats({}, identity={"color": str(chosen or "")})
+        ok("published to the session")
+    except Exception as exc:                      # noqa: BLE001
+        fail(f"saved, but I could not publish it: {exc}")
+        return 1
+    return 0
+
+
 def cmd_name(args: argparse.Namespace) -> int:
     if not args.value:
         print(resolve_name())
         return 0
-    final = set_default_name(args.value)
-    ok(f"default display name is now {c(final, '1')}")
+    # THE SAME PLACE THE COLOUR GOES. A name and a colour are two halves of
+    # one identity, and having them land in two different files meant
+    # `collab name` on an agent with its own directory quietly renamed every
+    # agent on the machine.
+    from . import identity as ident
+
+    home = _which_agent(args, "name")
+    if home is None:
+        return 2
+    if ident.agent_slug(home):
+        final = _slug(args.value)
+        ident.save(home, name=final)
+        ok(f"this agent is now {c(final, '1')}")
+        slug = ident.agent_slug(home)
+        if final != slug:
+            print(dim(f"  the directory stays {home.name}"))
+    else:
+        final = set_default_name(args.value)
+        ok(f"default display name is now {c(final, '1')}")
     profile = SessionProfile.current()
     if profile is not None:
         try:
@@ -1642,6 +2293,8 @@ def build_parser() -> argparse.ArgumentParser:
     lk.set_defaults(func=cmd_lock)
 
     j = sub.add_parser("join", help="join a session and start collaborating")
+    j.add_argument("--agent", default="",
+                   help="which of this repo's agents is joining")
     j.add_argument("url", nargs="?", default="",
                    help="the join URL (https://host#INVITE), or a session id with --local")
     j.add_argument("--local", action="store_true",
@@ -1786,9 +2439,45 @@ def build_parser() -> argparse.ArgumentParser:
     add_session_flag(k)
     k.set_defaults(func=cmd_kick)
 
-    n = sub.add_parser("name", help="show or set your global display name")
+    n = sub.add_parser("name", help="show or set this agent's display name")
+    n.add_argument("--agent", default="",
+                   help="which agent directory this belongs to, when the "
+                        "repo has more than one")
     n.add_argument("value", nargs="?")
     n.set_defaults(func=cmd_name)
+
+    th = sub.add_parser("theme", help="how the conversation looks")
+    th.add_argument("value", nargs="?")
+    th.add_argument("-l", "--list", action="store_true",
+                    help="list the themes in your themes folder")
+    th.add_argument("-n", "--new", metavar="NAME",
+                    help="write a new theme file you can edit")
+    th.add_argument("--from", dest="desde", metavar="THEME",
+                    help="start the new file from this theme instead of the "
+                         "one you have on")
+    th.add_argument("--check", action="store_true",
+                    help="report anything mis-written in your theme files")
+    th.set_defaults(func=cmd_theme)
+
+    ag = sub.add_parser("agent", help="create, update, delete and list agents")
+    ag.add_argument("action", choices=("create", "update", "delete", "list"))
+    ag.add_argument("name", nargs="?", default="")
+    ag.add_argument("--color", default="", help="the colour others see it in")
+    ag.add_argument("--rename", default="", help="update: its new display name")
+    ag.add_argument("--force", action="store_true",
+                    help="delete: do not ask, even with a terminal")
+    ag.set_defaults(func=cmd_agent)
+
+    who = sub.add_parser("whoami", help="this agent's name, colour and state directory")
+    who.set_defaults(func=cmd_whoami)
+
+    col = sub.add_parser("color", help="show or set the colour others see you in")
+    col.add_argument("--agent", default="",
+                     help="which agent directory this belongs to, when the "
+                          "repo has more than one")
+    col.add_argument("value", nargs="?",
+                     help="a hex colour like #00cccc, or 'none' to clear it")
+    col.set_defaults(func=cmd_color)
 
     d = sub.add_parser("daemon", help="manage the listener")
     d.add_argument("action", choices=["start", "stop", "status"], nargs="?", default="status")

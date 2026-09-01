@@ -275,12 +275,41 @@ def create_app(
         if person is not None:
             meta = dict(person.meta)
             changed = False
-            for key in ("machine", "machine_id", "user"):
-                if body.get(key):
-                    meta[key] = str(body[key])
-                    changed = True
+            # `color` travels here because it is the same kind of thing as
+            # the machine: something you declare about yourself that others see
+            # in their roster. Without it, a chosen colour would stay on the
+            # machine that chose it, which is the opposite of the point.
+            # PRESENT vs TRUTHY. `if body.get(key)` cannot tell "I am not
+            # reporting this" from "clear it": an empty string fell into the
+            # first, so `collab color` with no value said [ok] and everyone kept
+            # seeing the old colour, with nothing to explain why.
+            for key in ("machine", "machine_id", "user", "color"):
+                if key not in body:
+                    continue
+                value = str(body[key] or "")
+                if value == str(meta.get(key) or ""):
+                    # SAME AS BEFORE IS NOT A CHANGE. The daemon reports stats
+                    # on its heartbeat, so treating every report as a change
+                    # would publish an event six times a minute per participant
+                    # and refresh every roster in the room for nothing.
+                    continue
+                if value:
+                    meta[key] = value
+                else:
+                    meta.pop(key, None)
+                changed = True
             if changed:
                 await asyncio.to_thread(store.update_meta, user.id, meta)
+                # PUSHED, not waited for. Every other viewer re-reads the roster
+                # when a presence event arrives, and without this the only thing
+                # that moved it was the 9-second poll: you change your colour,
+                # look at the other screen, see nothing, and change it again.
+                await hub.publish(Envelope(
+                    kind=KIND_PRESENCE, sender=person.name, sender_id=user.id,
+                    room=DEFAULT_ROOM,
+                    body={"event": "updated their details", "id": user.id,
+                          "identity": True},
+                ))
         return {"ok": True}
 
     @app.post(f"{EXT_PREFIX}/rename", tags=["collab"])

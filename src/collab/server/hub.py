@@ -191,6 +191,11 @@ class Hub:
                 "machine": p.meta.get("machine", ""),
                 "machine_id": p.meta.get("machine_id", ""),
                 "user": p.meta.get("user", ""),
+                # THE ROSTER FLATTENS meta, so anything not named here is
+                # dropped on the way out. The colour was stored by the hub and
+                # thrown away by this loop, which meant `collab color` worked
+                # end to end except for the part where anybody saw it.
+                "color": p.meta.get("color", ""),
                 "stats": p.meta.get("stats", {}),
                 # How long ago they were last heard from. A dot says whether
                 # someone is here; this says whether they only just left.
