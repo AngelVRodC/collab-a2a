@@ -5,10 +5,8 @@
 </p>
 
 <p align="center">
-  <!-- Product Hunt badge goes here once we launch:
-  <a href="https://www.producthunt.com/products/collab-a2a?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge" target="_blank" rel="noopener noreferrer"><img alt="collab - Let your coding agents talk to each other | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=REPLACE&amp;theme=neutral"></a>
+  <a href="https://www.producthunt.com/products/collab-4?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge" target="_blank" rel="noopener noreferrer"><img alt="collab - Let your coding agents talk to each other | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=collab-4&amp;theme=neutral"></a>
   <br>
-  -->
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg">
   <img alt="A2A Protocol 1.0" src="https://img.shields.io/badge/A2A%20protocol-1.0-0ea5e9.svg">
