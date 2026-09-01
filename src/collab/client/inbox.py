@@ -108,11 +108,75 @@ class Inbox:
         return [Envelope.from_dict(json.loads(r["payload"])) for r in rows]
 
     def all_events(self, limit: int = 100) -> list[Envelope]:
+        """The last ``limit`` events, or every one of them when it is 0.
+
+        SQLite reads a negative LIMIT as no limit at all, which is how «show me
+        the whole conversation» is said without building the query twice.
+        """
         with self._lock:
             rows = self._db.execute(
-                "SELECT payload FROM inbox ORDER BY seq DESC LIMIT ?", (limit,)
+                "SELECT payload FROM inbox ORDER BY seq DESC LIMIT ?",
+                (limit if limit > 0 else -1,),
             ).fetchall()
         return [Envelope.from_dict(json.loads(r["payload"])) for r in reversed(rows)]
+
+    def before(self, seq: int, limit: int = 200) -> list[Envelope]:
+        """The ``limit`` events immediately before ``seq``, oldest first.
+
+        What the viewer reaches for when somebody scrolls off the top of what
+        it opened with: the log is complete on disk, so running out of screen
+        is not the same as running out of conversation.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT payload FROM inbox WHERE seq < ? ORDER BY seq DESC LIMIT ?",
+                (seq, limit if limit > 0 else -1),
+            ).fetchall()
+        return [Envelope.from_dict(json.loads(r["payload"])) for r in reversed(rows)]
+
+    def after(self, seq: int, limit: int = 200) -> list[Envelope]:
+        """The ``limit`` events immediately after ``seq``, oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT payload FROM inbox WHERE seq > ? ORDER BY seq LIMIT ?",
+                (seq, limit if limit > 0 else -1),
+            ).fetchall()
+        return [Envelope.from_dict(json.loads(r["payload"])) for r in rows]
+
+    def first(self, limit: int = 50) -> list[Envelope]:
+        """The oldest ``limit`` events: the beginning of the conversation."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT payload FROM inbox ORDER BY seq LIMIT ?",
+                (limit if limit > 0 else -1,),
+            ).fetchall()
+        return [Envelope.from_dict(json.loads(r["payload"])) for r in rows]
+
+    def count_after(self, seq: int) -> int:
+        """How many events are newer than ``seq``.
+
+        A count and not a fetch: the viewer holds a window of the conversation
+        and still has to say how much is below it, which is the number and not
+        the messages.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS c FROM inbox WHERE seq > ?", (seq,)
+            ).fetchone()
+        return int(row["c"])
+
+    def has_before(self, seq: int) -> bool:
+        """Is there anything older than ``seq`` in here?
+
+        Asked rather than inferred from the seq itself: the numbers are the
+        hub's, and a participant never receives what was said in other people's
+        direct messages, so «my oldest is 12» does not mean eleven are missing.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM inbox WHERE seq < ? LIMIT 1", (seq,)
+            ).fetchone()
+        return row is not None
 
     def gaps(self) -> list[int]:
         """Missing seq values — used by the tests to prove nothing was dropped."""

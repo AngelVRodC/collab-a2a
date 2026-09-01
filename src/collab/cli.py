@@ -1299,7 +1299,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
         try:
             tui.ROSTER_SHARE = max(5, min(roster_size, 90)) / 100
-            return tui.run(profile, view=view)
+            # `--limit` reached the plain renderer only, so the full view
+            # opened on the last 500 messages however much was asked for —
+            # asking for more got you less, and silently.
+            opening = tui.OPEN_WITH if args.limit is None else max(args.limit, 0)
+            return tui.run(profile, view=view, limit=opening)
         except KeyboardInterrupt:
             return 0
         except Exception as exc:
@@ -1308,7 +1312,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
             warn(f"could not start the full view ({exc}); showing the plain one")
 
     try:
-        return w.watch(profile, follow=not args.no_follow, limit=args.limit)
+        return w.watch(profile, follow=not args.no_follow,
+                       limit=200 if args.limit is None else args.limit)
     except KeyboardInterrupt:
         print()
         return 0
@@ -2399,7 +2404,12 @@ def build_parser() -> argparse.ArgumentParser:
     wa.add_argument("--no-follow", action="store_true", help="print and exit")
     wa.add_argument("--plain", action="store_true",
                     help="scrolling text instead of the full-screen view")
-    wa.add_argument("--limit", type=int, default=200, help="how much history to show")
+    # No default here: the two renderers want different ones and only one of
+    # them can be right. The full view opens on a handful and reaches back for
+    # the rest as you scroll; the plain one prints once and cannot.
+    wa.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="how much history to open with "
+                         "(default: 5 in the full view, 200 plain)")
     wa.add_argument("--layout", choices=["split", "tmux", "chat", "roster"],
                     help="split: one window · tmux: two real panes · "
                          "chat/roster: one of them only (default: your saved setting)")

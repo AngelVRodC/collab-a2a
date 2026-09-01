@@ -19,12 +19,48 @@ from collab.config import SessionProfile
 class FakeModel:
     """Enough of a Model for the parts of Tui that do not draw."""
 
-    def __init__(self):
+    def __init__(self, older=0, newer=0):
         self.profile = SessionProfile(session_id="s", url="u", name="me",
                                       host_name="host", token="t", home="/tmp")
         self.events = []
         self.snapshot = {}
         self.status = {}
+        #: What is on disk either side of the loaded window, and what the
+        #: viewer did about it.
+        self.older = older
+        self.newer = newer
+        self.pulls = 0
+        self.jumps: list[str] = []
+
+    def more_above(self):
+        return self.older > 0
+
+    def pending(self):
+        return self.newer
+
+    def load_older(self, count=200):
+        if not self.older:
+            return 0
+        self.pulls += 1
+        took = min(count, self.older)
+        self.older -= took
+        return took
+
+    def load_newer(self, count=200):
+        if not self.newer:
+            return 0
+        self.pulls += 1
+        took = min(count, self.newer)
+        self.newer -= took
+        return took
+
+    def load_tail(self):
+        self.jumps.append("tail")
+        self.older, self.newer = self.older + self.newer, 0
+
+    def load_start(self):
+        self.jumps.append("start")
+        self.newer, self.older = self.newer + self.older, 0
 
 
 def _tui(view="both", chat_top=8):
@@ -142,3 +178,104 @@ def test_a_pane_that_fits_everything_reports_nothing_to_scroll():
     pane = Pane(rows=10, total=4)
     pane.settle()
     assert pane.offset == 0
+
+
+# --- getting back to the newest ---------------------------------------------
+
+@pytest.mark.parametrize("key", [ord("G"), curses.KEY_END])
+def test_end_and_G_both_jump_to_the_newest(key):
+    """End is the key people press; G is the one vi users press.
+
+    And «the newest» is what is being said now, not the end of the window: a
+    reader fifty messages behind it is asking for the live end, which is the
+    whole reason the key exists.
+    """
+    tui = _tui()
+    tui.model.newer = 300
+    tui.chat.offset, tui.chat.follow = 0, False
+
+    tui.handle(key)
+    assert tui.model.jumps == ["tail"]
+    assert tui.chat.offset == max(tui.chat.total - tui.chat.rows, 0)
+    assert tui.chat.follow, "and the pane follows what is said next"
+
+
+@pytest.mark.parametrize("key", [ord("g"), curses.KEY_HOME])
+def test_home_and_g_both_go_to_the_top(key):
+    """And «the top» is the start of the conversation, not of the window."""
+    tui = _tui()
+    tui.model.older = 300
+    tui.chat.offset = 100
+
+    tui.handle(key)
+    assert tui.model.jumps == ["start"]
+    assert tui.chat.offset == 0
+    assert not tui.chat.follow
+
+
+def test_half_page_keys_move_half_a_pane():
+    tui = _tui()
+    tui.chat.offset, tui.chat.follow = 100, False
+
+    tui.handle(4)                      # ctrl-D
+    assert tui.chat.offset == 105
+    tui.handle(21)                     # ctrl-U
+    assert tui.chat.offset == 100
+
+
+# --- history that is on disk but not on screen ------------------------------
+
+def test_reaching_the_top_pulls_in_older_messages():
+    """The viewer opens on the last hundred; the rest is not lost, just not
+    loaded, and the top of the screen is where you ask for it."""
+    tui = _tui()
+    tui.model.older = 500
+    tui.chat.offset, tui.chat.follow = 1, False
+
+    tui.handle(curses.KEY_UP)          # lands on 0
+    assert tui.model.pulls == 1, "more history was fetched"
+
+
+def test_older_messages_are_not_fetched_while_you_are_reading_the_middle():
+    tui = _tui()
+    tui.model.older = 500
+    tui.chat.offset, tui.chat.follow = 50, False
+
+    tui.handle(curses.KEY_UP)
+    assert tui.model.pulls == 0
+
+
+def test_the_top_key_reaches_the_real_beginning():
+    """`g` means the start of the conversation, not the start of the page."""
+    tui = _tui()
+    tui.model.older = 450
+
+    tui.handle(ord("g"))
+    assert tui.model.older == 0
+    assert tui.chat.offset == 0
+
+
+def test_a_conversation_that_fits_does_not_drag_the_log_in():
+    """Sitting at the bottom of a short conversation is offset 0 as well.
+
+    Reading that as «show me more history» pulled the whole log in a page per
+    keystroke and dropped the pane off the live end while doing it.
+    """
+    tui = _tui()
+    tui.model.older = 500
+    tui.chat.total, tui.chat.rows = 4, 10      # it all fits
+    tui.chat.settle()
+
+    for _ in range(5):
+        tui.handle(curses.KEY_DOWN)
+
+    assert tui.model.pulls == 0
+    assert tui.chat.follow, "and it is still following what is said next"
+
+
+def test_nothing_older_means_nothing_to_fetch():
+    tui = _tui()
+    tui.chat.offset, tui.chat.follow = 0, False
+
+    tui.handle(curses.KEY_UP)
+    assert tui.model.pulls == 0

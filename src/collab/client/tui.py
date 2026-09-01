@@ -51,6 +51,18 @@ MIN_ROSTER_ROWS = 3
 WHEEL_LINES = 3
 POLL_SECONDS = 0.25
 
+#: HOW MANY MESSAGES THE PANE HOLDS AT ONCE, and how many it opens with.
+#:
+#: Laying the conversation out is linear in what is loaded — every message
+#: wrapped, folded and framed — so what is loaded is what the pane costs. A
+#: bounded window makes that cost a constant instead of something that grows
+#: with the session: the reader moves the window, the window does not grow
+#: under the reader. Nothing is lost by it; the log on disk keeps everything
+#: and the window slides over it, a page at a time, at either end.
+WINDOW = 50
+OPEN_WITH = 5
+PAGE = 25
+
 # Colour pair ids.
 C_TITLE = 1
 C_DIM = 2
@@ -391,8 +403,28 @@ def _current_theme() -> dict:
     except OSError:
         stamp = ()
     if _THEME_CACHE.get("key") != (chosen, stamp):
-        _THEME_CACHE.update(key=(chosen, stamp), theme=themes.resolve(chosen))
+        # The version is what tells the row cache the rendering rules moved.
+        # Comparing the theme dicts themselves would work and costs more than
+        # the redraw it is trying to avoid.
+        _THEME_CACHE.update(key=(chosen, stamp), theme=themes.resolve(chosen),
+                            version=_THEME_CACHE.get("version", 0) + 1)
     return _THEME_CACHE["theme"]
+
+
+def _colour_stamp() -> tuple:
+    """The chosen colours, as something a cache key can compare.
+
+    By value and not by count: somebody running `collab color` does not change
+    how many people have one, and a rebuild keyed on the count would leave
+    their new colour off the screen until something else moved.
+    """
+    return tuple(sorted(_CHOSEN.items()))
+
+
+def _theme_version() -> int:
+    """Bumped whenever the resolved theme changes. Cheap enough per frame."""
+    _current_theme()
+    return int(_THEME_CACHE.get("version", 0))
 
 
 def _fmt_money(value: Any) -> str:
@@ -516,10 +548,20 @@ class Model:
     snapshot: dict[str, Any] = field(default_factory=dict)
     status: dict[str, Any] = field(default_factory=dict)
     _seen: int = 0
+    #: Whether anything older than what is loaded exists; None = not asked yet.
+    _older: bool | None = None
+    _inbox: Any = None
 
     @property
     def paths(self) -> DaemonPaths:
         return DaemonPaths(self.profile.dir)
+
+    @property
+    def inbox(self) -> Inbox:
+        """One connection for the life of the viewer, not one per question."""
+        if self._inbox is None:
+            self._inbox = Inbox(self.profile.dir)
+        return self._inbox
 
     def title(self) -> str:
         return (self.snapshot.get("title")
@@ -582,12 +624,117 @@ class Model:
                         if n not in published])
         return people
 
-    def load_initial(self, limit: int = 500) -> None:
-        inbox = Inbox(self.profile.dir)
-        self.events = inbox.all_events(limit=limit)
-        self._seen = self.paths.root.joinpath("inbox.jsonl").stat().st_size \
-            if (self.paths.root / "inbox.jsonl").exists() else 0
+    def load_initial(self, limit: int = OPEN_WITH) -> None:
+        """What the viewer opens on: the last ``limit`` messages.
+
+        A few, deliberately. It used to be the last 500 whatever you asked for
+        —`--limit` reached the plain renderer and not this one, so asking for
+        more got you less— and every one of them was laid out again on every
+        redraw. Opening on what is on screen and reaching back for the rest is
+        the difference between a pane that appears and one that arrives.
+        """
+        self.events = self.inbox.all_events(limit=min(limit or WINDOW, WINDOW))
+        self._older = None
+        self._sync_seen()
         self.refresh_side()
+
+    def _sync_seen(self) -> None:
+        """Start following the log from its end, not from where we last were.
+
+        The window is filled from the database; the byte offset is what the
+        tail of the JSONL is read from. Left behind, everything between would
+        arrive a second time.
+        """
+        path = self.paths.root / "inbox.jsonl"
+        try:
+            self._seen = path.stat().st_size
+        except OSError:
+            self._seen = 0
+
+    # -- the window ----------------------------------------------------------
+    #
+    # The viewer holds a WINDOW over the conversation, not the conversation. The
+    # log on disk is complete and stays complete; what is in memory —and so what
+    # is laid out, wrapped and framed— is WINDOW messages, whichever WINDOW you
+    # are looking at. Scrolling off either end slides it, and the pane says
+    # which way there is more.
+
+    def _trim(self, *, keep: str) -> None:
+        """Hold the window to size, dropping from the end you are leaving."""
+        over = len(self.events) - WINDOW
+        if over <= 0:
+            return
+        if keep == "start":
+            del self.events[-over:]
+        else:
+            del self.events[:over]
+            self._older = True
+
+    def load_older(self, count: int = PAGE) -> int:
+        """Slide the window back.
+
+        Opening on the whole of a long session costs a wait nobody asked for,
+        and opening on the last few used to be the end of the matter: above the
+        first message there was nothing, and no way to tell a conversation that
+        starts there from one that was merely cut.
+        """
+        if not self.events or not self.more_above():
+            return 0
+        first = int(getattr(self.events[0], "seq", 0) or 0)
+        older = self.inbox.before(first, limit=count)
+        self._older = None
+        if not older:
+            return 0
+        self.events[:0] = older
+        self._trim(keep="start")
+        return len(older)
+
+    def load_newer(self, count: int = PAGE) -> int:
+        """Slide the window forward, towards what is being said now."""
+        if not self.events or not self.pending():
+            return 0
+        last = int(getattr(self.events[-1], "seq", 0) or 0)
+        newer = self.inbox.after(last, limit=count)
+        if not newer:
+            return 0
+        self.events.extend(newer)
+        self._trim(keep="end")
+        return len(newer)
+
+    def load_tail(self) -> None:
+        """Back to the live end, however far away it is."""
+        self.events = self.inbox.all_events(limit=WINDOW)
+        self._older = None
+        self._sync_seen()
+
+    def load_start(self) -> None:
+        """To the beginning, in one read rather than a page at a time."""
+        self.events = self.inbox.first(limit=WINDOW)
+        self._older = False
+
+    def pending(self) -> int:
+        """Messages that have arrived below the window and are not in it.
+
+        Read from the log rather than counted as they land: while you are
+        scrolled back the window is held still —yanking it about under a reader
+        is not «live», it is unusable— so the count has to come from the place
+        that does keep everything.
+        """
+        if not self.events:
+            return 0
+        last = int(getattr(self.events[-1], "seq", 0) or 0)
+        return self.inbox.count_after(last) if last else 0
+
+    def more_above(self) -> bool:
+        """Whether anything is left further back.
+
+        Remembered between frames: it is read on every redraw to label the
+        pane, and the answer only moves when the loaded history does.
+        """
+        if self._older is None:
+            first = int(getattr(self.events[0], "seq", 0) or 0) if self.events else 0
+            self._older = bool(first) and self.inbox.has_before(first)
+        return self._older
 
     def refresh_side(self) -> None:
         try:
@@ -596,14 +743,36 @@ class Model:
             pass
         self.status = read_status(self.profile) or self.status
 
-    def poll_events(self) -> int:
-        """Read whatever has been appended since we last looked."""
+    def poll_events(self, follow: bool = True) -> int:
+        """Read whatever has been appended since we last looked.
+
+        ONLY WHILE THE READER IS AT THE BOTTOM. Scrolled back, the window is
+        held exactly where it was put: appending would slide it —fifty messages
+        is fifty messages— and take the paragraph being read off the screen. The
+        arrivals are not lost, they are on disk and counted, and the pane says
+        how many are waiting below.
+        """
+        if not follow:
+            return 0
+        if self.pending():
+            # Following again after reading back through the history: the
+            # window is somewhere in the middle, and the tail of the log is not
+            # what comes after it. Reload the end rather than splicing the
+            # newest messages onto a page from an hour ago.
+            self.load_tail()
+            return 0
         path = self.paths.root / "inbox.jsonl"
         try:
             size = path.stat().st_size
         except OSError:
             return 0
-        if size <= self._seen:
+        if size < self._seen:
+            # The log was replaced under us — a session reset, or a state
+            # directory rebuilt. Reading from the old offset would splice the
+            # middle of one conversation onto the start of another.
+            self.load_tail()
+            return 0
+        if size == self._seen:
             return 0
         added = 0
         try:
@@ -621,6 +790,8 @@ class Model:
                 self._seen = fh.tell()
         except OSError:
             return 0
+        if added:
+            self._trim(keep="end")
         return added
 
 
@@ -1067,6 +1238,29 @@ def classic_rows(env: Envelope, width: int, me: str,
     return rows
 
 
+#: The global name, and when it was last worked out. IT IS NOT FREE: resolving
+#: it runs `git rev-parse` and `git config user.name`, reads the identity file
+#: and walks the state directories. my_names() is asked once PER MESSAGE, and
+#: the conversation is rebuilt on every redraw — measured at 300 messages that
+#: was 900 forks a frame and 2 s of it, which is exactly what made the pane feel
+#: like treacle. The answer changes when somebody runs `collab name`, so it is
+#: re-read on a timer rather than kept for the life of the process.
+_OWN_NAME: dict[str, Any] = {}
+OWN_NAME_TTL = 2.0
+
+
+def _own_name() -> str | None:
+    now = time.monotonic()
+    if _OWN_NAME and now - _OWN_NAME["at"] < OWN_NAME_TTL:
+        return _OWN_NAME["name"]
+    try:
+        own = resolve_name()
+    except Exception:                                    # noqa: BLE001
+        own = None
+    _OWN_NAME.update(name=own, at=now)
+    return own
+
+
 def my_names(session: str) -> list[str]:
     """Every name I can appear signing under.
 
@@ -1082,10 +1276,7 @@ def my_names(session: str) -> list[str]:
     did nothing.
     """
     out = [session] if session else []
-    try:
-        own = resolve_name()
-    except Exception:                                    # noqa: BLE001
-        own = None
+    own = _own_name()
     # The session name is always mine — the hub handed it to me. The global one
     # is mine only while nobody else is using it: it differs from the session
     # name exactly when the hub had to suffix me, and it had to suffix me
@@ -1256,6 +1447,83 @@ class Tui:
         #: The theme the rows on screen were built with, so a change can be
         #: noticed and the reader's place kept across it.
         self._theme_drawn: str = ""
+        #: WHAT THE CACHED ROWS WERE BUILT FROM. Laying out the conversation is
+        #: linear in the whole history —every message wrapped, folded and framed
+        #: again— and it was being done on every redraw, four times a second and
+        #: once per keystroke. Nothing in it depends on where you are scrolled,
+        #: so it is done when an input actually changes and not before: that is
+        #: the difference between a wheel notch costing a second and costing
+        #: nothing.
+        self._rows_key: tuple = ()
+        self._chat_width = 0
+        self._roster_key: tuple = ()
+        self._roster_rows: list[Row] = []
+
+    # -- cached layout -------------------------------------------------------
+
+    def _conversation(self, width: int) -> list[Row]:
+        """The conversation as rows, rebuilt only when something moved."""
+        events = self.model.events
+        key = (width, len(events), int(getattr(events[-1], "seq", 0) or 0) if events else 0,
+               frozenset(self.expanded), _theme_version(),
+               self.model.profile.name, _colour_stamp())
+        if key != self._rows_key:
+            self._rows_key = key
+            self._chat_width = width
+            self._chat_rows = conversation_rows(events, width,
+                                                self.model.profile.name,
+                                                self.expanded)
+        return self._chat_rows
+
+    def reach_back(self) -> int:
+        """At the top of what is loaded, pull the page before it in.
+
+        And put the message you were reading back where it was: the new rows
+        arrive ABOVE it, so leaving the offset alone would jump the pane a page
+        further back and read as an overshoot rather than as more history.
+        """
+        if self.chat.offset > 0 or not self.model.more_above():
+            return 0
+        seq = self.chat.top_seq(self._chat_rows)
+        added = self.model.load_older()
+        if not added or not self._chat_width:
+            return added
+        rows = self._conversation(self._chat_width)
+        self.chat.follow = False
+        self.chat.total = len(rows)
+        self.chat.hold(seq, rows)
+        return added
+
+    def reach_forward(self) -> int:
+        """At the bottom of the window, pull the page after it in.
+
+        The mirror of reach_back, and the reason scrolling down out of the
+        history does not stop dead one screen short of what is being said now.
+        """
+        rows = self._chat_rows
+        at_bottom = self.chat.offset >= max(len(rows) - self.chat.rows, 0)
+        if not at_bottom or not self.model.pending():
+            return 0
+        seq = self.chat.top_seq(rows)
+        added = self.model.load_newer()
+        if not added or not self._chat_width:
+            return added
+        rows = self._conversation(self._chat_width)
+        self.chat.total = len(rows)
+        if not self.chat.follow:
+            self.chat.hold(seq, rows)
+        return added
+
+    def _roster(self, width: int) -> list[Row]:
+        people = self.model.participants()
+        # The whole roster as text, plus a coarse clock: the rows carry «4m
+        # ago», which goes stale while the snapshot itself says the same thing.
+        key = (width, _theme_version(), _colour_stamp(), repr(people),
+               int(time.monotonic() // 5))
+        if key != self._roster_key:
+            self._roster_key = key
+            self._roster_rows = roster_rows(self.model, width)
+        return self._roster_rows
 
     # -- drawing ------------------------------------------------------------
 
@@ -1306,10 +1574,33 @@ class Tui:
                     pass
 
     def draw(self, win) -> None:
+        """Paint a frame. A curses failure here loses A FRAME, not the viewer.
+
+        This is what «the watch pane dies» was: `addnwstr() returned ERR` from
+        one write to the last cell of a pane somebody had just dragged narrow,
+        straight out through curses.wrapper, and `collab watch` fell back to the
+        plain scrolling transcript — the full-screen view gone for good over a
+        single character it could not place. Every write in here is bounded, and
+        the ones that are not are the ones that get it wrong; a dropped frame is
+        repainted a quarter of a second later and nobody sees it.
+        """
+        try:
+            self._draw(win)
+        except curses.error:
+            try:
+                win.refresh()
+            except curses.error:
+                pass
+
+    def _draw(self, win) -> None:
         win.erase()
         height, width = win.getmaxyx()
         if height < 4 or width < 24:
-            win.addnstr(0, 0, "window too small", max(width - 1, 1))
+            # Never into the last cell of the last row: on a one-column pane
+            # that is the write that ends the viewer.
+            room = max(width - 1, 0)
+            if room:
+                win.addnstr(0, 0, "window too small"[:room], room)
             win.refresh()
             return
 
@@ -1366,7 +1657,7 @@ class Tui:
         # all, and a pane you cannot see is a pane you cannot scroll.
         roster_h = min(roster_h, max(body_height - 4, 2))
 
-        rows = roster_rows(self.model, width - 1)
+        rows = self._roster(width - 1)
         self.roster.rows = roster_h - 1
         self.roster.total = len(rows)
         self.roster.settle()
@@ -1392,7 +1683,7 @@ class Tui:
 
         chat_top = body_top + roster_h
         self._chat_top = chat_top
-        self._hline(win, chat_top, width, "CONVERSATION")
+        self._hline(win, chat_top, width, self._chat_label())
 
         # WHERE WE WERE, IN MESSAGES, BEFORE THE ROWS ARE REBUILT. Taken from
         # the rows that are on screen right now, because after the rebuild the
@@ -1400,10 +1691,8 @@ class Tui:
         antes = self.chat.top_seq(self._chat_rows) if self._chat_rows else 0
         tema_antes = self._theme_drawn
 
-        chat_rows = conversation_rows(self.model.events, width - 1,
-                                      self.model.profile.name, self.expanded)
+        chat_rows = self._conversation(width - 1)
         self._chat_top = chat_top + 1
-        self._chat_rows = chat_rows
         self.chat.rows = height - chat_top - 2
         self.chat.total = len(chat_rows)
         self.chat.settle()
@@ -1421,12 +1710,70 @@ class Tui:
             self._paint_row(win, chat_top + 1 + i, chat_rows[idx], width - 1)
 
         # --- help ----------------------------------------------------------
-        hint = " wheel/tab: pane · ↑↓ pgup/pgdn: scroll · [ ]: roster · g/G: top/end · q: quit "
-        if not self.chat.follow:
-            hint = " ⏸ scrolled back — G to resume following ·" + hint
-        win.addnstr(height - 1, 0, hint[:width - 1], width - 1,
-                    curses.color_pair(C_DIM) | curses.A_DIM)
+        self._hint(win, height, width)
         win.refresh()
+
+    def _hint(self, win, height: int, width: int) -> None:
+        """The bottom line: the keys, or what you are missing by not being at
+        the bottom.
+
+        Scrolled back, the count is the point — «G to resume following» does not
+        say whether anything has been said since you left, which is the only
+        reason to go back down. The key is named twice, End first: it is the one
+        people try, and the one that needs no explaining.
+        """
+        keys = (" wheel/tab: pane · ↑↓ pgup/pgdn: scroll · [ ]: roster · "
+                "End/G: newest · Home/g: top · q: quit ")
+        line, attr = keys, curses.color_pair(C_DIM) | curses.A_DIM
+        if not self.chat.follow:
+            behind = self.behind()
+            what = (f"{behind} new below" if behind else "scrolled back")
+            line = f" ⏸ {what} — End (or G) jumps to the newest ·{keys}"
+            if behind:
+                attr = curses.color_pair(C_ACCENT) | curses.A_BOLD
+        try:
+            win.addnstr(height - 1, 0, line[:max(width - 1, 0)],
+                        max(width - 1, 0), attr)
+        except curses.error:
+            pass
+
+    def _chat_label(self) -> str:
+        """Say when the top of the screen is not the top of the conversation.
+
+        A viewer that opens on the last hundred messages and says nothing about
+        it is indistinguishable from one showing everything there is, which is
+        how you end up believing history was lost.
+        """
+        if self.model.more_above():
+            return "CONVERSATION · older above (keep scrolling, or g)"
+        return "CONVERSATION"
+
+    def behind(self) -> int:
+        """How many messages there are below what is on screen.
+
+        Counted in MESSAGES and not in rows: rows are a rendering detail —
+        the same message is five of them in one theme and one in another — and
+        «37 new below» would mean nothing to the reader if it moved with the
+        theme.
+        """
+        rows = self._chat_rows
+        if not rows or self.chat.follow:
+            return 0
+        last = self.chat.offset + max(self.chat.rows, 1) - 1
+        if last >= len(rows) - 1:
+            return 0
+        visible = [row.seq for row in rows[self.chat.offset:last + 1] if row.seq]
+        if not visible:
+            # A viewport showing nothing but separators: fall back to counting
+            # the messages that begin below it.
+            return len({row.seq for row in rows[last + 1:] if row.seq})
+        top = max(visible)
+        loaded = sum(1 for env in self.model.events
+                     if int(getattr(env, "seq", 0) or 0) > top)
+        # PLUS WHAT IS NOT LOADED. The window is held still while you read, so
+        # what has arrived since sits on disk — and it is the part of «how far
+        # behind am I» that actually grows.
+        return loaded + self.model.pending()
 
     # -- input --------------------------------------------------------------
 
@@ -1469,7 +1816,14 @@ class Tui:
         # Scrolling a pane is also a statement about which one you care about.
         if self.view == "both":
             self.focus = where
+        if where == "chat":
+            self.reach_back() if up else self.reach_forward()
         return True
+
+    #: The keys that mean «earlier» and «later». Reaching for more history is
+    #: decided by which of these was pressed, not by where the offset landed.
+    _BACKWARD = frozenset({curses.KEY_UP, ord("k"), curses.KEY_PPAGE, 21})
+    _FORWARD = frozenset({curses.KEY_DOWN, ord("j"), curses.KEY_NPAGE, 4})
 
     def handle(self, key: int) -> bool:
         """Returns False when the user asked to leave."""
@@ -1496,16 +1850,49 @@ class Tui:
             pane.scroll(-max(pane.rows - 1, 1))
         elif key == curses.KEY_NPAGE:
             pane.scroll(max(pane.rows - 1, 1))
-        elif key == ord("g"):
-            pane.to_start()
-        elif key == ord("G"):
+        # BACK TO THE NEWEST, on the key people actually press. `G` is vi's and
+        # stays, but somebody who has scrolled up in a chat window reaches for
+        # End — and when it did nothing, the way back to the live tail was to
+        # hold ↓ through the history you had just scrolled past.
+        elif key in (ord("G"), curses.KEY_END, curses.KEY_LL):
+            if pane is self.chat:
+                # The end means what is being said NOW, not the end of the
+                # window: a reader who scrolled away an hour ago is fifty
+                # messages behind it, and walking there a page at a time is
+                # exactly the thing this key exists to avoid.
+                self.model.load_tail()
+                self._chat_rows = self._conversation(self._chat_width or 80)
+                self.chat.total = len(self._chat_rows)
             pane.to_end()
+        elif key in (ord("g"), curses.KEY_HOME, curses.KEY_FIND):
+            if pane is self.chat:
+                # And the top means the top of the CONVERSATION, not the top of
+                # what happened to be loaded.
+                self.model.load_start()
+                self._chat_rows = self._conversation(self._chat_width or 80)
+                self.chat.total = len(self._chat_rows)
+            pane.to_start()
+        # Ctrl-D / Ctrl-U, half a pane at a time: the wheel's step is too small
+        # for crossing a long history and a full page is too big to read across.
+        elif key == 4:
+            pane.scroll(max(pane.rows // 2, 1))
+        elif key == 21:
+            pane.scroll(-max(pane.rows // 2, 1))
         # The roster is the pane you dip into and leave, so it gets keys that
         # do not require taking focus away from the conversation first.
         elif key in (ord("["), curses.KEY_SR):
             self.roster.scroll(-1)
         elif key in (ord("]"), curses.KEY_SF):
             self.roster.scroll(1)
+        # BY THE DIRECTION ASKED FOR, not by where the offset ended up. A
+        # window smaller than the pane is at the top and at the bottom at the
+        # same time, so the state cannot tell «show me what came before» from
+        # «I am at the live end» — and that is the ordinary case now that the
+        # pane opens on a handful of messages.
+        if pane is self.chat and key in self._BACKWARD:
+            self.reach_back()
+        elif pane is self.chat and key in self._FORWARD:
+            self.reach_forward()
         return True
 
     def _mouse(self) -> None:
@@ -1545,24 +1932,23 @@ class Tui:
         m = self.model
         people = m.participants()
         if self.view == "roster":
-            rows = roster_rows(m, width - 1)
+            rows = self._roster(width - 1)
             pane, label = self.roster, f"PARTICIPANTS ({len(people)})"
         else:
-            rows = conversation_rows(m.events, width - 1, m.profile.name,
-                                     self.expanded)
-            pane, label = self.chat, "CONVERSATION"
+            rows = self._conversation(width - 1)
+            pane, label = self.chat, self._chat_label()
             self._chat_top = 1
-            self._chat_rows = rows
 
         state = str(m.status.get("state") or "?")
         state_pair = {"live": C_ONLINE, "reconnecting": C_WARN}.get(state, C_OFFLINE)
         head = f" {m.title()} · {label} "
         win.attron(curses.color_pair(C_TITLE) | curses.A_BOLD)
         win.hline(0, 0, " ", width)
-        win.addnstr(0, 0, head, max(width - 1, 0))
+        win.addnstr(0, 0, head[:max(width - 1, 0)], max(width - 1, 0))
         win.attroff(curses.color_pair(C_TITLE) | curses.A_BOLD)
         badge = f" {state} "
-        win.addnstr(0, max(width - len(badge) - 1, 0), badge, max(width - 1, 0),
+        win.addnstr(0, max(width - len(badge) - 1, 0), badge[:max(width - 1, 0)],
+                    max(width - 1, 0),
                     curses.color_pair(state_pair) | curses.A_BOLD)
 
         pane.rows = height - 2
@@ -1574,9 +1960,16 @@ class Tui:
                 break
             self._paint_row(win, 1 + i, rows[idx], width - 1)
 
-        hint = " wheel · ↑↓ pgup/pgdn: scroll · g/G: top/end · q: quit "
-        win.addnstr(height - 1, 0, hint[:width - 1], width - 1,
-                    curses.color_pair(C_DIM) | curses.A_DIM)
+        if self.view == "roster":
+            hint = " wheel · ↑↓ pgup/pgdn: scroll · Home/End: top/end · q: quit "
+            try:
+                win.addnstr(height - 1, 0, hint[:max(width - 1, 0)],
+                            max(width - 1, 0),
+                            curses.color_pair(C_DIM) | curses.A_DIM)
+            except curses.error:
+                pass
+        else:
+            self._hint(win, height, width)
 
 
 def _init_colors() -> None:
@@ -1599,7 +1992,7 @@ def _init_colors() -> None:
         curses.init_pair(C_SPEAKER_BASE + i, colour, -1)
 
 
-def run(profile: SessionProfile, view: str = "both") -> int:
+def run(profile: SessionProfile, view: str = "both", limit: int = OPEN_WITH) -> int:
     # MI PROPIO COLOR, DE LA CONFIG LOCAL, ANTES DE MIRAR EL ROSTER.
     #
     # Chosen colours arrive through the roster, which comes from the hub. Mine
@@ -1614,7 +2007,7 @@ def run(profile: SessionProfile, view: str = "both") -> int:
         record_colours([{"name": n, "color": mine}
                           for n in my_names(profile.name)])
     model = Model(profile=profile)
-    model.load_initial()
+    model.load_initial(limit=limit)
     tui = Tui(model, view=view)
 
     def loop(win) -> int:
@@ -1649,26 +2042,66 @@ def run(profile: SessionProfile, view: str = "both") -> int:
             curses.set_escdelay(25)
         except (AttributeError, curses.error):
             pass
+        # WAIT FOR INPUT INSTEAD OF SLEEPING PAST IT. With nodelay the loop
+        # asked once, found nothing and slept a quarter of a second, so a key
+        # pressed just after the ask sat unread for that long before anything
+        # moved. Blocking with a timeout gives the same idle refresh rate and
+        # answers a keystroke the moment it arrives.
+        win.nodelay(False)
+        win.timeout(int(POLL_SECONDS * 1000))
         last_side = 0.0
         while True:
             now = time.time()
             if now - last_side > 1.0:
                 model.refresh_side()
                 last_side = now
-            model.poll_events()
+            # Only while the reader is at the bottom: see poll_events.
+            model.poll_events(tui.chat.follow)
             tui.draw(win)
 
+            # EVERYTHING WAITING, THEN ONE REDRAW. A wheel notch is three key
+            # events and a spin is thirty; handling each with its own repaint
+            # is what made a fast scroll lag behind the hand and then carry on
+            # travelling after it stopped. Drained in one go, a spin moves the
+            # pane once, by the whole distance.
             key = win.getch()
-            if key == 27:
-                # Drain the rest of the sequence so its tail is not read as
-                # commands (an arrow key would otherwise scroll unbidden).
-                while win.getch() != -1:
-                    pass
-                key = -1
-            if key == curses.KEY_RESIZE:
+            if key == -1:
                 continue
-            if key != -1 and not tui.handle(key):
-                return 0
-            time.sleep(POLL_SECONDS if key == -1 else 0.01)
+            win.timeout(0)
+            try:
+                while key != -1:
+                    if key == 27:
+                        # The tail of an escape sequence is not a command: an
+                        # arrow key would otherwise scroll unbidden.
+                        while win.getch() != -1:
+                            pass
+                        break
+                    if key == curses.KEY_RESIZE:
+                        _on_resize(win)
+                    elif not tui.handle(key):
+                        return 0
+                    key = win.getch()
+            except curses.error:
+                pass
+            finally:
+                win.timeout(int(POLL_SECONDS * 1000))
 
     return curses.wrapper(loop)
+
+
+def _on_resize(win) -> None:
+    """A resize invalidates more than the geometry.
+
+    `_screen_width` remembers what tmux said the window measured, keyed by the
+    pane's width — and dragging a border changes both, so the cached answer has
+    to go with them. The rows are rebuilt at the new width by the next draw.
+    """
+    _SCREEN.clear()
+    try:
+        curses.update_lines_cols()
+    except (AttributeError, curses.error):
+        pass
+    try:
+        win.clear()
+    except curses.error:
+        pass

@@ -69,9 +69,14 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setattr(tui, "_pair_for", lambda v: 99)
     config._CACHE.clear()
     tui._CHOSEN.clear()
+    # The viewer remembers the global name for a couple of seconds — resolving
+    # it costs two `git` calls and it is asked for once per message. A test
+    # that changes the name has to say so, like the config cache above.
+    tui._OWN_NAME.clear()
     yield path
     config._CACHE.clear()
     tui._CHOSEN.clear()
+    tui._OWN_NAME.clear()
 
 
 def _participants(session_name, roster=()):
