@@ -131,8 +131,12 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
-            self._migrate()
+            # WAL before the migration, not after: the back-fills below are DML,
+            # sqlite3 opens an implicit transaction for them, and journal_mode
+            # cannot change inside one.  Run after, the pragma quietly does
+            # nothing and every migrated session stays on the rollback journal.
             self._db.execute("PRAGMA journal_mode=WAL")
+            self._migrate()
             self._db.commit()
 
     def _columns(self, table: str) -> set[str]:
