@@ -43,11 +43,27 @@ async def event_stream(request: Request, hub: Hub, participant: str,
             # Replay before live delivery. Anything that lands mid-replay is
             # already sitting in the queue, so the client sees each seq once.
             if resume_from is not None:
-                missed = await asyncio.to_thread(
-                    hub.store.since, resume_from, viewer=participant
-                )
-                for env in missed:
-                    yield _frame(env)
+                # PAGED, BECAUSE `since` ANSWERS 500 AT A TIME. One call was a
+                # silent hole: a client joining a session with more than 500
+                # events behind it —or coming back after a long absence— got
+                # the first 500, then live delivery, and its stored seq jumped
+                # to the newest. The gap in the middle was never asked for
+                # again, and the viewer showed a conversation missing its
+                # middle with nothing to say so.
+                # Up to what the store held when we subscribed, and no further:
+                # everything after that is already in this participant's queue,
+                # so replaying past it would send those events twice.
+                top = hub.store.max_seq()
+                cursor = resume_from
+                while cursor < top:
+                    missed, moved = await asyncio.to_thread(
+                        hub.store.since_page, cursor, viewer=participant
+                    )
+                    for env in missed:
+                        yield _frame(env)
+                    if moved <= cursor:
+                        break
+                    cursor = moved
 
             yield {
                 "event": "ready",

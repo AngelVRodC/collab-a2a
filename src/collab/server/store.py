@@ -233,9 +233,20 @@ class Store:
 
     def since(self, seq: int, *, viewer: str | None = None, limit: int = 500) -> list[Envelope]:
         """Events after ``seq`` that ``viewer`` (a participant id) may see."""
+        return self.since_page(seq, viewer=viewer, limit=limit)[0]
+
+    def since_page(self, seq: int, *, viewer: str | None = None,
+                   limit: int = 500) -> tuple[list[Envelope], int]:
+        """One page of ``since``, plus how far the read actually got.
+
+        The cursor is the last seq READ, not the last one returned. They differ
+        whenever a page is filtered — a run of somebody else's direct messages
+        comes back empty — and paging by what was returned would then ask for
+        the same page for ever, or stop early and leave a hole.
+        """
         with self._lock:
             rows = self._db.execute(
-                "SELECT payload, recipient_id, sender_id FROM events WHERE seq > ?"
+                "SELECT seq, payload, recipient_id, sender_id FROM events WHERE seq > ?"
                 " ORDER BY seq LIMIT ?",
                 (seq, limit),
             ).fetchall()
@@ -244,7 +255,7 @@ class Store:
             if not _visible_to(r["recipient_id"], r["sender_id"], viewer):
                 continue
             out.append(Envelope.from_dict(json.loads(r["payload"])))
-        return out
+        return out, int(rows[-1]["seq"]) if rows else seq
 
     def history(self, *, room: str | None = None, viewer: str | None = None,
                 limit: int = 50) -> list[Envelope]:

@@ -59,6 +59,30 @@ def test_resume_from_zero_backfills_the_whole_session(live_server, host_headers)
     assert [f["text"] for f in frames] == ["m0", "m1", "m2"]
 
 
+def test_a_backfill_larger_than_one_page_still_arrives_whole(live_server, session,
+                                                             host_headers):
+    """The store answers 500 at a time, and the replay used to ask once.
+
+    Past that, a client joining a busy session —or coming back after a long
+    absence— was sent the first 500, then live delivery, and stored the newest
+    seq. The events in between were never asked for again: a hole in the middle
+    of the conversation, with nothing anywhere to say it was there.
+    """
+    base = live_server["base"]
+    store = session["store"]
+    from collab.protocol import Envelope
+
+    total = 640                                    # more than one page of 500
+    for i in range(total):
+        store.append(Envelope(kind="chat", text=f"m{i}", sender="alice",
+                              room="general"))
+
+    frames = _frames(base, host_headers, since=0, expect=total, timeout=30.0)
+    assert len(frames) == total
+    assert [f["seq"] for f in frames] == list(range(1, total + 1)), \
+        "contiguous seq: no page was skipped and none was sent twice"
+
+
 def test_replayed_dms_stay_private(live_server, session, host_headers):
     """Replay has to apply the same visibility rules as live delivery."""
     base = live_server["base"]
