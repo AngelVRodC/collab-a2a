@@ -102,8 +102,7 @@ def test_expired_invite_is_rejected(client, session):
 
 
 def test_only_the_host_can_remove_people(client, session, host_headers):
-    bob = _join(client, session)
-    bob_headers = {"Authorization": f"Bearer {bob['token']}"}
+    bob_headers = _headers(_join(client, session))
     assert client.post("/ext/collab/v1/revoke", json={"name": "alice"},
                        headers=bob_headers).status_code == 403
     assert client.post("/ext/collab/v1/revoke", json={"name": "bob"},
@@ -157,15 +156,13 @@ def test_the_hosts_name_is_protected_too(client, session):
 
 def test_a_name_freed_by_a_rename_can_be_taken(client, session):
     """Rejection is about live collisions, not reserving names forever."""
-    bob = _join(client, session, name="bob")
-    headers = {"Authorization": f"Bearer {bob['token']}"}
+    headers = _headers(_join(client, session, name="bob"))
     client.post("/ext/collab/v1/rename", json={"name": "roberto"}, headers=headers)
     assert _join(client, session, name="bob")["name"] == "bob"
 
 
 def test_renaming_onto_a_taken_name_is_refused(client, session):
-    bob = _join(client, session, name="bob")
-    headers = {"Authorization": f"Bearer {bob['token']}"}
+    headers = _headers(_join(client, session, name="bob"))
     r = client.post("/ext/collab/v1/rename", json={"name": "alice"}, headers=headers)
     assert r.status_code == 409
 
@@ -173,10 +170,8 @@ def test_renaming_onto_a_taken_name_is_refused(client, session):
 # --- visibility -------------------------------------------------------------------
 
 def test_direct_messages_are_private(client, session, host_headers):
-    bob = _join(client, session, name="bob")
-    carol = _join(client, session, name="carol")
-    bob_h = {"Authorization": f"Bearer {bob['token']}"}
-    carol_h = {"Authorization": f"Bearer {carol['token']}"}
+    bob_h = _headers(_join(client, session, name="bob"))
+    carol_h = _headers(_join(client, session, name="carol"))
 
     client.post("/ext/collab/v1/messages", json={"text": "just between us", "to": "alice"},
                 headers=bob_h)
@@ -193,30 +188,23 @@ def test_direct_messages_are_private(client, session, host_headers):
 # --- the shared task board ----------------------------------------------------------
 
 def test_a_task_cannot_be_claimed_twice(client, session, host_headers):
-    bob = _join(client, session, name="bob")
-    bob_h = {"Authorization": f"Bearer {bob['token']}"}
-    task = client.post("/ext/collab/v1/tasks",
-                       json={"action": "propose", "title": "migrate sessions"},
-                       headers=host_headers).json()["task"]
+    bob_h = _headers(_join(client, session, name="bob"))
+    task = _propose(client, host_headers)
     assert task["state"] == "TASK_STATE_SUBMITTED"
 
-    first = client.post("/ext/collab/v1/tasks", json={"action": "claim", "id": task["id"]},
-                        headers=bob_h)
+    first = _act(client, bob_h, "claim", task["id"])
     assert first.status_code == 200
     assert first.json()["task"]["owner"] == "bob"
 
     # This is the whole point of the board: alice must not start it too.
-    second = client.post("/ext/collab/v1/tasks", json={"action": "claim", "id": task["id"]},
-                         headers=host_headers)
+    second = _act(client, host_headers, "claim", task["id"])
     assert second.status_code == 409
     assert "already claimed by bob" in second.json()["detail"]
 
 
 def test_task_lifecycle_uses_real_a2a_states(client, host_headers):
-    task = client.post("/ext/collab/v1/tasks", json={"action": "propose", "title": "t"},
-                       headers=host_headers).json()["task"]
-    done = client.post("/ext/collab/v1/tasks", json={"action": "complete", "id": task["id"]},
-                       headers=host_headers).json()["task"]
+    task = _propose(client, host_headers, title="t")
+    done = _act(client, host_headers, "complete", task["id"]).json()["task"]
     assert done["state"] == "TASK_STATE_COMPLETED"
     assert client.get("/ext/collab/v1/tasks?open_only=true",
                       headers=host_headers).json()["tasks"] == []
@@ -226,6 +214,10 @@ def test_task_lifecycle_uses_real_a2a_states(client, host_headers):
 #
 # Claiming is what stops two agents starting the same work.  If anyone may then
 # fail or cancel the claim, the claim means nothing.
+
+
+def _headers(joined):
+    return {"Authorization": f"Bearer {joined['token']}"}
 
 
 def _propose(client, headers, title="migrate sessions"):
@@ -245,17 +237,21 @@ def _state(client, headers, task_id):
     return next(t["state"] for t in tasks if t["id"] == task_id)
 
 
+def _claimed(client, session, host_headers, name="worker"):
+    """A task the host proposed and `name` claimed."""
+    worker_h = _headers(_join(client, session, name=name))
+    task = _propose(client, host_headers)
+    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    return task, worker_h
+
+
 def test_proposing_a_task_still_works(client, host_headers):
     """Guards the owner_id binding in the propose branch.
 
     Propose never reads an existing row, so it has to bind ``owner_id`` itself.
     Without that, every proposal raises NameError at the upsert and returns 500.
     """
-    r = client.post("/ext/collab/v1/tasks",
-                    json={"action": "propose", "title": "migrate sessions"},
-                    headers=host_headers)
-    assert r.status_code == 200, r.text
-    task = r.json()["task"]
+    task = _propose(client, host_headers)
     assert task["state"] == "TASK_STATE_SUBMITTED"
     assert task["owner"] is None and task["owner_id"] is None
 
@@ -263,13 +259,8 @@ def test_proposing_a_task_still_works(client, host_headers):
 @pytest.mark.parametrize("action", ["fail", "cancel", "complete"])
 def test_a_bystander_cannot_end_someone_elses_claimed_task(
         client, session, host_headers, action):
-    worker = _join(client, session, name="worker")
-    worker_h = {"Authorization": f"Bearer {worker['token']}"}
-    bob = _join(client, session, name="bob")
-    bob_h = {"Authorization": f"Bearer {bob['token']}"}
-
-    task = _propose(client, host_headers)
-    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    task, _ = _claimed(client, session, host_headers)
+    bob_h = _headers(_join(client, session, name="bob"))
 
     r = _act(client, bob_h, action, task["id"])
     assert r.status_code == 403, r.text
@@ -278,11 +269,7 @@ def test_a_bystander_cannot_end_someone_elses_claimed_task(
 
 
 def test_the_owner_can_fail_their_own_task(client, session, host_headers):
-    worker = _join(client, session, name="worker")
-    worker_h = {"Authorization": f"Bearer {worker['token']}"}
-
-    task = _propose(client, host_headers)
-    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    task, worker_h = _claimed(client, session, host_headers)
 
     r = _act(client, worker_h, "fail", task["id"])
     assert r.status_code == 200, r.text
@@ -291,11 +278,7 @@ def test_the_owner_can_fail_their_own_task(client, session, host_headers):
 
 def test_the_host_can_cancel_a_task_someone_else_claimed(client, session, host_headers):
     """The host runs the session and has to be able to unstick a dead claim."""
-    worker = _join(client, session, name="worker")
-    worker_h = {"Authorization": f"Bearer {worker['token']}"}
-
-    task = _propose(client, host_headers)
-    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    task, _ = _claimed(client, session, host_headers)
 
     r = _act(client, host_headers, "cancel", task["id"])
     assert r.status_code == 200, r.text
@@ -311,13 +294,8 @@ def test_renaming_yourself_does_not_lose_your_own_task(client, session, host_hea
     third party is still refused, which is the half that would break if the
     guard ever went back to comparing display names.
     """
-    worker = _join(client, session, name="worker")
-    worker_h = {"Authorization": f"Bearer {worker['token']}"}
-    bob = _join(client, session, name="bob")
-    bob_h = {"Authorization": f"Bearer {bob['token']}"}
-
-    task = _propose(client, host_headers)
-    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    task, worker_h = _claimed(client, session, host_headers)
+    bob_h = _headers(_join(client, session, name="bob"))
     assert client.post("/ext/collab/v1/rename", json={"name": "roberta"},
                        headers=worker_h).status_code == 200
 
@@ -330,16 +308,11 @@ def test_renaming_yourself_does_not_lose_your_own_task(client, session, host_hea
 
 def test_whoever_claims_a_freed_name_inherits_no_task(client, session, host_headers):
     """The reclaim trap: a name check would have handed the task straight over."""
-    worker = _join(client, session, name="worker")
-    worker_h = {"Authorization": f"Bearer {worker['token']}"}
-
-    task = _propose(client, host_headers)
-    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    task, worker_h = _claimed(client, session, host_headers)
     assert client.post("/ext/collab/v1/rename", json={"name": "roberta"},
                        headers=worker_h).status_code == 200
 
-    eve = _join(client, session, name="worker")   # the freed name
-    eve_h = {"Authorization": f"Bearer {eve['token']}"}
+    eve_h = _headers(_join(client, session, name="worker"))   # the freed name
     assert _act(client, eve_h, "cancel", task["id"]).status_code == 403
     assert _act(client, eve_h, "claim", task["id"]).status_code == 409
     assert _state(client, host_headers, task["id"]) == "TASK_STATE_WORKING"
@@ -353,13 +326,8 @@ def test_proposing_over_an_existing_id_cannot_un_claim_it(client, session, host_
     unconditionally. So a bystander re-proposing a claimed id cleared the owner
     and could then cancel it -- two ordinary calls, no crafted HTTP.
     """
-    worker = _join(client, session, name="worker")
-    worker_h = {"Authorization": f"Bearer {worker['token']}"}
-    bob = _join(client, session, name="bob")
-    bob_h = {"Authorization": f"Bearer {bob['token']}"}
-
-    task = _propose(client, host_headers)
-    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    task, _ = _claimed(client, session, host_headers)
+    bob_h = _headers(_join(client, session, name="bob"))
     assert _act(client, bob_h, "fail", task["id"]).status_code == 403
 
     r = client.post("/ext/collab/v1/tasks",
@@ -379,13 +347,8 @@ def test_a_task_naming_an_owner_it_cannot_attribute_fails_closed(
     return 409, and fail/cancel were open to everyone. Both now refuse, and the
     host stays the way to end it.
     """
-    worker = _join(client, session, name="worker")
-    worker_h = {"Authorization": f"Bearer {worker['token']}"}
-    bob = _join(client, session, name="bob")
-    bob_h = {"Authorization": f"Bearer {bob['token']}"}
-
-    task = _propose(client, host_headers)
-    assert _act(client, worker_h, "claim", task["id"]).status_code == 200
+    task, _ = _claimed(client, session, host_headers)
+    bob_h = _headers(_join(client, session, name="bob"))
 
     store = session["store"]
     with store._lock:

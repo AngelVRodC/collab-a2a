@@ -83,6 +83,24 @@ def _require(request: Request):
     return user
 
 
+def _may_touch(record: dict[str, Any], who: str, *, is_host: bool) -> bool:
+    """Authorize a file row by id, never by name — a name can change hands.
+
+    A row written before the id columns existed cannot prove who its two ends
+    were, so it is refused rather than guessed at.  The host is the exception:
+    the blob is on their disk and they can already withdraw it.
+
+    Note this is deliberately not ``store._visible_to``, which answers the same
+    shape of question for events: there a null recipient id means room-wide,
+    here it means unprovable.  Same columns, opposite defaults.
+    """
+    if not record["recipient"] and not record["recipient_id"]:
+        return True
+    if not record["recipient_id"]:
+        return is_host
+    return who in (record["recipient_id"], record["sender_id"])
+
+
 def create_app(
     *,
     store: Store,
@@ -344,21 +362,19 @@ def create_app(
                 raise HTTPException(status_code=404, detail=f"no such task {task_id!r}")
             title = str(body.get("title") or existing["title"])
             owner, owner_id = existing["owner"], existing["owner_id"]
+            # An unclaimed task has no owner to wrong and stays open to everyone.
+            # A task naming an owner the id back-fill could not resolve is held
+            # too — refused rather than guessed at, the same way a file with no
+            # ids is, leaving the host as the only way to end it.
+            held_by_other = bool(owner_id or owner) and owner_id != user.id
             if action == "claim":
-                if (owner_id or owner) and owner_id != user.id:
+                if held_by_other:
                     raise HTTPException(
                         status_code=409,
                         detail=f"{task_id} is already claimed by {owner}",
                     )
                 owner, owner_id = user.name, user.id
-            elif (owner_id or owner) and owner_id != user.id and not user.is_host:
-                # Claiming is what stops two agents starting the same work;
-                # letting anyone fail or cancel a claimed task makes the claim
-                # meaningless.  An unclaimed task has no owner to wrong, so it
-                # stays open to everyone — today's behaviour, unchanged.
-                # A task that names an owner the id back-fill could not resolve
-                # is refused rather than guessed at, the same way a file with no
-                # ids is: the host is then the only way to end it.
+            elif held_by_other and not user.is_host:
                 raise HTTPException(status_code=403, detail=f"{task_id} belongs to {owner}")
 
         record = await asyncio.to_thread(
@@ -395,19 +411,6 @@ def create_app(
             with contextlib.suppress(OSError):
                 _blob(record["id"]).unlink()
             store.mark_file(record["id"], "expired")
-
-    def _may_touch(record: dict[str, Any], who: str, *, is_host: bool = False) -> bool:
-        """Authorize by id, never by name — a name can change hands.
-
-        A row written before the id columns existed cannot prove who its two ends
-        were, so it is refused rather than guessed at.  The host is the exception:
-        the blob is on their disk and they can already withdraw it.
-        """
-        if not record["recipient"] and not record["recipient_id"]:
-            return True
-        if not record["recipient_id"]:
-            return is_host
-        return who in (record["recipient_id"], record["sender_id"])
 
     def _download_url(file_id: str) -> str:
         return f"{live_url().rstrip('/')}{EXT_PREFIX}/files/{file_id}/content"

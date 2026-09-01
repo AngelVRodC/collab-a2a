@@ -14,6 +14,7 @@ import json
 import sqlite3
 import threading
 
+from collab.protocol import Envelope
 from collab.server.store import SCHEMA, Store, _migrate
 
 #: ``events`` exactly as it was before ``3946c6b`` — no id columns.
@@ -27,17 +28,6 @@ CREATE TABLE IF NOT EXISTS events (
     ts        TEXT NOT NULL,
     payload   TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS participants (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL UNIQUE,
-    token_hash TEXT NOT NULL UNIQUE,
-    is_host    INTEGER NOT NULL DEFAULT 0,
-    joined_at  REAL NOT NULL,
-    last_seen  REAL NOT NULL,
-    revoked    INTEGER NOT NULL DEFAULT 0,
-    meta       TEXT NOT NULL DEFAULT '{}'
-);
 """
 
 
@@ -45,18 +35,12 @@ def _old_db(path):
     """A database shaped the way the previous version left it."""
     db = sqlite3.connect(path)
     db.executescript(OLD_SCHEMA)
-    db.execute(
-        "INSERT INTO participants (id, name, token_hash, is_host, joined_at,"
-        " last_seen) VALUES (?, ?, ?, 1, 0, 0)",
-        ("p_old", "alice", "deadbeef"),
-    )
+    env = Envelope(kind="message", sender="alice", room="general",
+                   text="from before the migration", ts="2026-08-30T00:00:00Z")
     db.execute(
         "INSERT INTO events (kind, room, sender, recipient, ts, payload)"
         " VALUES (?, ?, ?, NULL, ?, ?)",
-        ("message", "general", "alice", "2026-08-30T00:00:00Z",
-         json.dumps({"collab": "1", "kind": "message", "from": "alice",
-                     "ts": "2026-08-30T00:00:00Z", "text": "from before the migration",
-                     "room": "general"})),
+        (env.kind, env.room, env.sender, env.ts, json.dumps(env.to_dict())),
     )
     db.commit()
     db.close()

@@ -116,7 +116,17 @@ def test_sender_can_withdraw_a_file(client, session, host_headers):
 def _rename(client, headers, name):
     r = client.post("/ext/collab/v1/rename", json={"name": name}, headers=headers)
     assert r.status_code == 200, r.text
-    return r
+
+
+def _forget_ids(session, file_id):
+    """A row as it was written before the id columns existed."""
+    store = session["store"]
+    with store._lock:
+        store._db.execute(
+            "UPDATE files SET sender_id=NULL, recipient_id=NULL WHERE id=?",
+            (file_id,),
+        )
+        store._db.commit()
 
 
 def test_the_recipient_can_still_download_after_renaming_themselves(
@@ -133,8 +143,7 @@ def test_the_recipient_can_still_download_after_renaming_themselves(
                        headers=bob).status_code == 200
 
 
-def test_the_sender_can_still_withdraw_after_renaming_themselves(
-        client, session, host_headers):
+def test_the_sender_can_still_withdraw_after_renaming_themselves(client, session):
     # The sender is a plain participant, not the host -- otherwise the host
     # bypass in delete_file would pass this test whatever the id check did.
     bob = _join(client, session, "bob")
@@ -169,13 +178,7 @@ def test_a_file_with_no_ids_is_refused_to_everyone_but_the_host(
     carol = _join(client, session, "carol")
     record = _upload(client, bob, b"legacy", name="old.bin", to="carol").json()
 
-    store = session["store"]
-    with store._lock:
-        store._db.execute(
-            "UPDATE files SET sender_id=NULL, recipient_id=NULL WHERE id=?",
-            (record["id"],),
-        )
-        store._db.commit()
+    _forget_ids(session, record["id"])
 
     # Even the real recipient is refused -- guessing at the ends is the bug.
     assert client.get(f"/ext/collab/v1/files/{record['id']}/content",
@@ -197,17 +200,11 @@ def test_acking_a_legacy_file_does_not_broadcast_it_on_replay(
     one predating the id columns, and the host bypass is what makes it ackable.
     """
     bob = _join(client, session, "bob")
-    carol = _join(client, session, "carol")
+    _join(client, session, "carol")
     dave = _join(client, session, "dave")
     record = _upload(client, bob, b"legacy", name="severance.pdf", to="carol").json()
 
-    store = session["store"]
-    with store._lock:
-        store._db.execute(
-            "UPDATE files SET sender_id=NULL, recipient_id=NULL WHERE id=?",
-            (record["id"],),
-        )
-        store._db.commit()
+    _forget_ids(session, record["id"])
 
     assert client.post(f"/ext/collab/v1/files/{record['id']}/ack",
                        headers=host_headers).status_code == 200

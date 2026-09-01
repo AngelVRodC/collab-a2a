@@ -130,8 +130,8 @@ def _ensure_columns(db: sqlite3.Connection, table: str,
 def _migrate(db: sqlite3.Connection) -> None:
     """Bring an existing database up to the schema this version expects."""
     _ensure_columns(db, "events", {"sender_id": "TEXT", "recipient_id": "TEXT"})
-    # No back-fill: a row written before these columns cannot prove who its two
-    # ends were, so it stays NULL and the route fails it closed.
+    # files gets no back-fill: a row written before these columns cannot prove
+    # who its two ends were, so it stays NULL and the route fails it closed.
     _ensure_columns(db, "files", {"sender_id": "TEXT", "recipient_id": "TEXT"})
     _ensure_columns(db, "tasks", {"owner_id": "TEXT"})
     # Tasks *are* back-filled, unlike files: a task board is durable, and a
@@ -144,10 +144,6 @@ def _migrate(db: sqlite3.Connection) -> None:
         "  WHERE participant_names.name = tasks.owner)"
         " WHERE owner_id IS NULL AND owner IS NOT NULL"
     )
-    # That UPDATE is the only DML here, and sqlite3 opens an implicit
-    # transaction for it.  Close it, or the caller's `PRAGMA journal_mode=WAL`
-    # fails with "cannot change into wal mode from within a transaction".
-    db.commit()
 
 
 def token_hash(token: str) -> str:
@@ -179,8 +175,10 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
-            _migrate(self._db)
+            # WAL before the migration: journal_mode cannot change inside a
+            # transaction, and a back-fill leaves one open.
             self._db.execute("PRAGMA journal_mode=WAL")
+            _migrate(self._db)
             self._db.commit()
 
     def close(self) -> None:
