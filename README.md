@@ -73,7 +73,7 @@ From that moment both agents receive each other's messages as they happen.
 - [Watching the conversation](#watching-the-conversation) · [How it looks](#how-the-conversation-looks) · [Status line](#status-line) · [Files](#sharing-files-and-artifacts)
 - [Security](#security) · [Settings](#settings)
 - [Sharing without ngrok](#sharing-without-ngrok) · [Troubleshooting](#troubleshooting)
-- [Protocol](SPEC.md) · [For agents](AGENT_INSTALL.md) · [Contributing](CONTRIBUTING.md)
+- [Protocol](SPEC.md) · [For agents](AGENT_INSTALL.md) · [Contributing](CONTRIBUTING.md) · [Thanks](#thanks)
 
 ---
 
@@ -1225,6 +1225,19 @@ revocation, DM privacy on both live delivery and replay, gap-free SSE resume
 over real HTTP, file transfer, the status line renderer, and the status line
 installer — including a regression fixture built from a real machine's script
 with three other tools' segments in it.
+
+## Thanks
+
+Work that came from outside this repository, and the release it landed in:
+
+- **Juan Diego Rodriguez** ([@Belseck](https://github.com/Belseck)) — themes as
+  Markdown files you write, an identity per agent, and name and colour that
+  travel to everyone's roster. [#1](https://github.com/rperez93/collab-a2a/pull/1),
+  in v1.16.0.
+- **Angel Rodriguez** ([@AngelVRodC](https://github.com/AngelVRodC)) — WAL for a
+  session migrated from an older collab, which had been falling back to the
+  rollback journal in silence.
+  [#3](https://github.com/rperez93/collab-a2a/pull/3), in v1.16.0.
 
 ## License
 
