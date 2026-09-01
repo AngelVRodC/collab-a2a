@@ -379,7 +379,12 @@ def _take_lock(profile: SessionProfile, *, role: str, hub_pid: int = 0) -> None:
     lockfile.acquire(lockfile.Lock(
         name=profile.name, session_id=profile.session_id, role=role,
         url=profile.url,
-        state_dir=(str(home) if home.name != COLLAB_DIRNAME else ""),
+        participant_id=profile.participant_id,
+        # Always, not only when it is unusual: an agent that has to work out
+        # where its own state is has been told nothing useful.
+        state_dir=str(home),
+        session_dir=str(profile.dir),
+        profile_path=str(profile.dir / "profile.json"),
         # Recorded from this process, so every later command this agent runs
         # can recognise its own directory without being told which it is.
         owner_pids=lockfile.ancestry(),
@@ -467,8 +472,14 @@ def cmd_lock(args: argparse.Namespace) -> int:
         return 0
     heading("collab lock")
     print(f"  {c(lock.name, '1')}  {lock.role}  in {c(lock.session_id, '36')}")
+    if lock.participant_id:
+        print(dim(f"  you are   {lock.participant_id}"))
     if lock.state_dir:
         print(dim(f"  state     {lock.state_dir}"))
+    if lock.session_dir:
+        print(dim(f"  session   {lock.session_dir}"))
+    if lock.profile_path:
+        print(dim(f"  profile   {lock.profile_path}"))
     print(dim(f"  pids      {', '.join(str(p) for p in lock.pids) or 'none'}"
               f"  ({'alive' if lock.held else 'gone'})"))
     print(dim(f"  held for  {int(lock.age() // 60)}m"))
@@ -542,6 +553,7 @@ def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
     lock = lockfile.read(base)
     if lock is None or not lock.held:
         return None                       # free, or nobody is behind it
+
     if lock.name == name:
         return None                       # our own claim, under our own name
 

@@ -123,6 +123,52 @@ state directory instead:
 You stay where you are — same working tree, same files. It is removed when you
 leave.
 
+## Knowing who you are: the lock file
+
+Each state folder holds `agent.lock`, written when you enter a session and
+removed when you leave. It is how the *next* agent sees that this folder is
+taken — and how you check what you are:
+
+```bash
+collab lock
+```
+
+```
+collab lock
+  bob  guest  in s_bb9c59a3
+  you are   p_e3fae444ab54
+  state     /home/perez/Pycharm/api/.collab-bob
+  session   /home/perez/Pycharm/api/.collab-bob/sessions/s_bb9c59a3
+  profile   /home/perez/Pycharm/api/.collab-bob/sessions/s_bb9c59a3/profile.json
+  pids      440970, 441056  (alive)
+```
+
+Your display name, your participant id — which does not change when a name
+does — the folder collab is using for you, your session's folder, and the file
+holding your credentials. `--json` gives the same to parse. If you are ever
+unsure which session or identity you are acting under, this is the answer.
+
+A claim is only as real as the processes behind it: when they are gone the lock
+is stale, and the next `host` or `join` clears it without being asked. **Never
+delete it by hand** — `collab lock clear` exists for that, and refuses while
+those processes are alive.
+
+**The one case that asks you.** If a lock is held — its processes alive — but
+the session behind it does not answer, collab stops and puts the question to
+the user rather than choosing:
+
+```
+[fail] the lock says alice (host) in s_bb9c59a3, but that session does not answer
+  Ask the user which they want:
+    · the other agent is still working — wait, or ask them for a link
+    · it is not — clear the lock and host a session here:
+        collab lock clear --force && collab host
+```
+
+A hub still starting, a hub wedged, and a crashed agent whose pid has been
+reused all look identical from here, and each wants a different answer. **Put
+it to the user and do what they say.**
+
 ## When it says nothing is running
 
 This is where agents most often reach the wrong conclusion. Read the whole

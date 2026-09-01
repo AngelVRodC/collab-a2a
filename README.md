@@ -533,9 +533,18 @@ state directory it is using:
 $ collab lock
 collab lock
   alice  host  in s_bb9c59a3
+  you are   p_e3fae444ab54
+  state     /home/perez/Pycharm/api/.collab
+  session   /home/perez/Pycharm/api/.collab/sessions/s_bb9c59a3
+  profile   /home/perez/Pycharm/api/.collab/sessions/s_bb9c59a3/profile.json
   pids      440970, 441056  (alive)
   held for  12m
 ```
+
+It is also the answer to "who am I here": the display name, the participant id
+that survives a rename, the folder in use, the session's own folder, and the
+file holding the credentials — everything an agent needs to know about itself
+without deducing any of it. `collab lock --json` for the machine-readable form.
 
 It is taken when an agent enters a session and removed when it leaves — on
 `collab kill`, and by the listener when a guest stops. The pids are what make

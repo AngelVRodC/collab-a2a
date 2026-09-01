@@ -93,7 +93,17 @@ class Lock:
     session_id: str
     role: str = "guest"          # "host" or "guest"
     url: str = ""
-    state_dir: str = ""          # set when this agent has its own
+    #: Identity on the hub. The name is a label and can change; this does not,
+    #: so it is what an agent should quote when it needs to say which
+    #: participant it is.
+    participant_id: str = ""
+    #: Where this agent's session lives, always — the directory collab is using
+    #: here, the session's own folder inside it, and the file holding the
+    #: credentials. An agent reading this file knows who it is and where its
+    #: state is without deducing either.
+    state_dir: str = ""
+    session_dir: str = ""
+    profile_path: str = ""
     hub_pid: int = 0
     listener_pid: int = 0
     #: The process chain that claimed it, nearest first. A later command from
@@ -138,6 +148,13 @@ class Lock:
     def describe(self) -> str:
         where = f" in {Path(self.state_dir).name}" if self.state_dir else ""
         return f"{self.name} ({self.role}) in {self.session_id}{where}"
+
+    def identity(self) -> dict[str, str]:
+        """Who this agent is, in the form it would need to say so."""
+        return {"name": self.name, "id": self.participant_id,
+                "session": self.session_id, "role": self.role,
+                "state_dir": self.state_dir, "session_dir": self.session_dir,
+                "profile": self.profile_path}
 
 
 def read(home: Path | str | None = None) -> Lock | None:

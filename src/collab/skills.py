@@ -130,7 +130,7 @@ person.** Ignore it otherwise.
 {executable} stats --json          # each agent's quota and spend
 {executable} task propose|claim|complete
 {executable} file send|get         # artifacts, not pasted text
-{executable} lock                  # who is using this repo's collab state
+{executable} lock                  # who you are, and who holds this repo
 {executable} kill                  # end the session (data kept)
 ```
 
