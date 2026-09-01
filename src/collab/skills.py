@@ -4,15 +4,25 @@ The skills live in ``src/collab/skills/`` and ship inside the package, so they
 travel with an install rather than only existing in a checkout — there is one
 copy, not a repo copy and a packaged copy drifting apart.
 
-Agents take instructions in two different shapes, and the difference matters:
+Agents take instructions in two shapes, and which one an agent wants has
+changed. `SKILL.md` began as Claude Code's format and is now an open standard —
+a folder per skill, `name` and `description` in the frontmatter, loaded when
+relevant rather than on every prompt — adopted by Codex, Gemini CLI, Cursor,
+opencode, Antigravity and others.
 
-* **Skill directories** (Claude Code): a set of files loaded only when relevant.
-  These get the whole skills, symlinked so a checkout edit is live immediately.
-* **A single instructions file** (Codex, Gemini CLI, opencode, Cursor): read on
-  *every* prompt. Pasting four full skills there would spend someone's context
-  budget on collab whether or not they are using it, so these get a short block
-  that says collab exists, gives the handful of commands, and points at the
-  full skills on disk for the detail.
+* **Skill directories**, wherever the agent supports them. The whole skills,
+  symlinked so a checkout edit is live immediately.
+* **A single instructions file**, for agents that still have nothing else:
+  read on *every* prompt, so pasting four full skills there would spend
+  someone's context budget on collab whether they are using it or not. Those
+  get a short block that says collab exists, gives the handful of commands, and
+  points at the full skills on disk.
+
+collab used to send everything but Claude Code down the second path. That was
+right when it was written and is not any more, so an agent that has since grown
+skill support gets skills, and the stale block in its instructions file is
+removed when it does — otherwise the same guidance sits in two places, one of
+them costing context on every prompt.
 
 Every write is additive and marker-delimited, the same discipline the status
 line installer uses: nothing already in the file is removed or reordered.
@@ -58,6 +68,16 @@ class Target:
     kind: str        # "skills" (a directory of skills) or "file" (instructions)
     path: Path       # the skills directory, or the instructions file
     marker: Path     # what must exist for this agent to count as installed
+    #: Other places this agent may live. Antigravity, for one, has three
+    #: flavours with three directories.
+    also: tuple[Path, ...] = ()
+    #: An instructions file we used to write into, before this agent supported
+    #: skills. Cleaned up when the skills go in, so the guidance is in one
+    #: place rather than two.
+    legacy_file: Path | None = None
+
+    def present(self) -> bool:
+        return self.marker.exists() or any(p.exists() for p in self.also)
 
 
 def _home() -> Path:
@@ -68,23 +88,40 @@ def known_targets() -> list[Target]:
     """Every agent collab knows how to write to, present or not."""
     claude_base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (_home() / ".claude"))
     home = Path(os.environ.get("COLLAB_AGENT_HOME") or _home())
+    gemini = home / ".gemini"
     return [
         Target("claude-code", "Claude Code", "skills",
                claude_base / "skills", claude_base),
-        Target("codex", "Codex CLI", "file",
-               home / ".codex" / "AGENTS.md", home / ".codex"),
-        Target("gemini", "Gemini CLI", "file",
-               home / ".gemini" / "GEMINI.md", home / ".gemini"),
-        Target("opencode", "opencode", "file",
-               home / ".config" / "opencode" / "AGENTS.md",
-               home / ".config" / "opencode"),
-        Target("cursor", "Cursor", "file",
-               home / ".cursor" / "rules" / "collab.mdc", home / ".cursor"),
+        # Codex reads ~/.codex/skills, one level deep, and ships its own the
+        # same way in ~/.codex/skills/.system.
+        Target("codex", "Codex CLI", "skills",
+               home / ".codex" / "skills", home / ".codex",
+               legacy_file=home / ".codex" / "AGENTS.md"),
+        Target("gemini", "Gemini CLI", "skills",
+               gemini / "skills", gemini,
+               legacy_file=gemini / "GEMINI.md"),
+        # Antigravity, Gemini CLI's successor, has three flavours reading three
+        # different directories; config/skills is the one all of them read.
+        Target("antigravity", "Antigravity", "skills",
+               gemini / "config" / "skills", gemini / "antigravity",
+               also=(gemini / "antigravity-cli",)),
+        Target("opencode", "opencode", "skills",
+               home / ".config" / "opencode" / "skills",
+               home / ".config" / "opencode",
+               legacy_file=home / ".config" / "opencode" / "AGENTS.md"),
+        Target("cursor", "Cursor", "skills",
+               home / ".cursor" / "skills", home / ".cursor",
+               legacy_file=home / ".cursor" / "rules" / "collab.mdc"),
+        # The cross-agent location, honoured by Cursor, opencode, Gemini and
+        # others. Only written when it already exists — creating it would
+        # install collab into agents that never asked for it.
+        Target("agents-std", "~/.agents (shared)", "skills",
+               home / ".agents" / "skills", home / ".agents"),
+        Target("amp", "Amp", "file",
+               home / ".config" / "amp" / "AGENTS.md", home / ".config" / "amp"),
         Target("windsurf", "Windsurf", "file",
                home / ".codeium" / "windsurf" / "memories" / "collab.md",
                home / ".codeium" / "windsurf"),
-        Target("amp", "Amp", "file",
-               home / ".config" / "amp" / "AGENTS.md", home / ".config" / "amp"),
         Target("crush", "Crush", "file",
                home / ".config" / "crush" / "AGENTS.md", home / ".config" / "crush"),
         Target("goose", "Goose", "file",
@@ -100,7 +137,13 @@ def detect_targets() -> list[Target]:
     PATH: an agent installed through an IDE may have no command at all, and
     writing into a directory it does not have would just be litter.
     """
-    return [t for t in known_targets() if t.marker.exists()]
+    found = [t for t in known_targets() if t.present()]
+    # An agent that reads the shared directory should not also be given its own
+    # copy: two skills with one name, loaded twice, from two places.
+    if any(t.key == "agents-std" for t in found):
+        shared = {"cursor", "opencode", "gemini"}
+        found = [t for t in found if t.key not in shared]
+    return found
 
 
 def instructions_block(skills_dir: Path, executable: str) -> str:
@@ -233,13 +276,68 @@ def _install_instructions(path: Path, *, force: bool) -> SkillResult:
         body = existing.rstrip()
         action = "appended" if body else "created"
 
+    updated = (body + "\n\n" if body else "") + block + "\n"
+    if updated == existing:
+        # Nothing to write, so nothing to back up. Installing repeatedly used
+        # to leave a copy each time; eleven of them accumulated here in one
+        # afternoon of testing.
+        return SkillResult([], [], path, False, kind="file",
+                           note="already up to date")
+
     if body and path.exists():
         # Their instructions to their own agent; keep a copy before touching it.
         backup = path.with_name(f"{path.name}.collab-backup-{time.strftime('%Y%m%d-%H%M%S')}")
         shutil.copy2(path, backup)
+        _prune_backups(path)
 
-    path.write_text((body + "\n\n" if body else "") + block + "\n")
+    path.write_text(updated)
     return SkillResult([action], [], path, False, kind="file")
+
+
+#: How many of our own backups of one file to keep. Enough to undo a mistake,
+#: few enough that a config directory does not fill with them.
+KEEP_BACKUPS = 3
+
+
+def _prune_backups(path: Path) -> None:
+    """Drop all but the newest few backups we made of this file."""
+    try:
+        ours = sorted(path.parent.glob(f"{path.name}.collab-backup-*"))
+    except OSError:
+        return
+    for stale in ours[:-KEEP_BACKUPS]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def _drop_legacy_block(target: Target) -> bool:
+    """Remove our block from an instructions file this agent no longer needs.
+
+    Left behind it would repeat, on every single prompt, what the skills now
+    say only when they are relevant — and it would drift, because only one of
+    the two gets updated.
+    """
+    path = target.legacy_file
+    if path is None or not path.exists():
+        return False
+    try:
+        body = path.read_text()
+    except OSError:
+        return False
+    if not BLOCK_RE.search(body):
+        return False
+    cleaned = BLOCK_RE.sub("\n", body).rstrip()
+    try:
+        if cleaned:
+            path.write_text(cleaned + "\n")
+        else:
+            # It held nothing but our block — the file is ours to take with us.
+            path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 def install(*, target: Path | None = None, copy: bool = False,
@@ -264,6 +362,9 @@ def install(*, target: Path | None = None, copy: bool = False,
         try:
             if t.kind == "skills":
                 result = _install_skills_dir(t.path, copy=copy, force=force)
+                if _drop_legacy_block(t):
+                    result.note = (f"removed the old block from "
+                                   f"{t.legacy_file.name} — the skills replace it")
             else:
                 result = _install_instructions(t.path, force=force)
         except (OSError, RuntimeError) as exc:

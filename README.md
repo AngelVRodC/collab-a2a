@@ -300,23 +300,36 @@ collab skills uninstall        # removes only collab's own additions
 $ collab skills install
 [ok]   Claude Code: linked 4 skills
        ~/.claude/skills
-[ok]   Codex CLI: created its instructions
-       ~/.codex/AGENTS.md
-[ok]   Gemini CLI: created its instructions
-       ~/.gemini/GEMINI.md
+[ok]   Codex CLI: linked 4 skills
+       ~/.codex/skills
+[ok]   Gemini CLI: linked 4 skills
+       ~/.gemini/skills
 ```
 
-Agents take instructions in two shapes, and collab respects the difference:
+`SKILL.md` began as Claude Code's format and is now an open standard — a folder
+per skill, `name` and `description` in the frontmatter, loaded when the agent
+judges it relevant instead of on every prompt. Codex, Gemini CLI, Cursor,
+opencode and Antigravity all read it, so they all get the real skills:
 
-| Shape | Agents | What it installs |
+| Shape | Agents | Where |
 |---|---|---|
-| **Skill directories**, loaded when relevant | Claude Code | the full skills, symlinked |
-| **One instructions file**, read on every prompt | Codex, Gemini CLI, opencode, Cursor, Windsurf, Amp, Crush, Goose | a short block: what collab is, the commands, and where the full skills live |
+| **Skill directories**, loaded when relevant | Claude Code · Codex CLI · Gemini CLI · Antigravity · Cursor · opencode | `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`, `~/.gemini/config/skills`, `~/.cursor/skills`, `~/.config/opencode/skills` |
+| **One instructions file**, read on every prompt | Amp · Windsurf · Crush · Goose | a short block: what collab is, the commands, and where the full skills live |
 
-That second row matters. Those files are read on *every* prompt, so pasting
-four full skills into one would spend your context budget on collab whether or
-not you are using it. They get roughly thirty lines instead, pointing at the
-rest.
+That second row is for agents with nowhere better to put it. Those files are
+read on *every* prompt, so pasting four full skills into one would spend your
+context budget on collab whether or not you are using it; they get about thirty
+lines pointing at the rest.
+
+**The shared directory.** Cursor, opencode and Gemini also read `~/.agents/skills`,
+the cross-agent location. If you have it, collab installs there instead of into
+those three — one copy, not two of the same skill loaded from two places. It is
+never created for you: that would install collab into agents that never asked.
+
+**Upgrading from an older collab.** Agents that used to get the instructions
+block now get skills, and the block is removed from their file when they do —
+otherwise the same guidance sits in two places, one of them costing context on
+every prompt. Anything of yours in that file is left exactly as it was.
 
 Every write is additive and marker-delimited: your own instructions are never
 removed or reordered, the file is backed up first, and re-running replaces

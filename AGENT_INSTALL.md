@@ -21,7 +21,7 @@ If it stops saying no Python ≥3.10 was found, tell the user which of the
 printed options to install. Do not try to work around it.
 
 This also installs collab's guidance into **every coding agent on the machine**
-— Claude Code gets the full skills, agents that read a single instructions file
+— agents that support `SKILL.md` get the full skills, the rest get a short block
 (Codex, Gemini CLI, opencode, Cursor and others) get a short block pointing at
 them. Verify both:
 

@@ -1439,13 +1439,14 @@ def cmd_skills(args: argparse.Namespace) -> int:
 
     if not results:
         warn("no coding agents detected on this machine")
-        print(dim("  collab looks for Claude Code, Codex, Gemini CLI, opencode,"))
-        print(dim("  Cursor, Windsurf, Amp, Crush and Goose by their config directories"))
+        print(dim("  collab looks for Claude Code, Codex, Gemini CLI, Antigravity, opencode,"))
+        print(dim("  Cursor, Amp, Windsurf, Crush and Goose by their config directories"))
         print(dim("  `collab skills status --all` shows every one it knows"))
         return 0
 
     for result in results:
-        if result.note:
+        if result.note and not result.installed:
+            # Nothing was installed, so the note is the whole story.
             warn(f"{result.label}: {result.note}")
             continue
         if not result.installed:
@@ -1459,6 +1460,8 @@ def cmd_skills(args: argparse.Namespace) -> int:
             what = result.installed[0]
             ok(f"{result.label}: {what} its instructions")
         print(f"       {dim(str(result.target))}")
+        if result.note:
+            print(f"       {dim(result.note)}")
         for name in result.skipped:
             warn(f"  {name} was already there and is not ours — --force replaces it")
 
