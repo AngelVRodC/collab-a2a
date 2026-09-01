@@ -129,8 +129,12 @@ def _monitor_hint(profile: SessionProfile, status: dict[str, Any]) -> None:
     """Tell the agent exactly how to start listening, with the real port filled in."""
     port = status.get("bridge_port") or profile.bridge_port
     exe = sys.argv[0]
+    # A session outside the repo's default directory has to say so, or the
+    # listener command resolves somewhere else and follows the wrong session.
+    where = ("" if Path(profile.home).name == COLLAB_DIRNAME
+             else f"COLLAB_HOME={profile.home} ")
     heading("To receive messages in real time, arm a Monitor on one of these:")
-    print(f"  {c('command', '36')}   {exe} listen --follow")
+    print(f"  {c('command', '36')}   {where}{exe} listen --follow")
     if port:
         print(f"  {c('ws', '36')}        ws://127.0.0.1:{port}/events")
     print(dim("  (either one delivers the same events; the daemon handles reconnects)"))
@@ -376,6 +380,9 @@ def _take_lock(profile: SessionProfile, *, role: str, hub_pid: int = 0) -> None:
         name=profile.name, session_id=profile.session_id, role=role,
         url=profile.url,
         state_dir=(str(home) if home.name != COLLAB_DIRNAME else ""),
+        # Recorded from this process, so every later command this agent runs
+        # can recognise its own directory without being told which it is.
+        owner_pids=lockfile.ancestry(),
         hub_pid=hub_pid, listener_pid=listener,
     ), profile.home)
 
@@ -533,8 +540,10 @@ def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
 
     base = base_home()
     lock = lockfile.read(base)
-    if lock is None or not lock.held or lock.name == name:
-        return None                       # free, stale, or already ours
+    if lock is None or not lock.held:
+        return None                       # free, or nobody is behind it
+    if lock.name == name:
+        return None                       # our own claim, under our own name
 
     mine = agent_home(name)
     os.environ["COLLAB_HOME"] = str(mine)
@@ -1131,9 +1140,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if args.tmux:
         argv = [str(Path(sys.argv[0]).resolve()), "watch",
                 "--session", profile.session_id]
-        passthrough = {k: os.environ[k] for k in ("COLLAB_HOME", "COLLAB_CONFIG",
-                                                  "COLLAB_NAME", "NO_COLOR")
+        passthrough = {k: os.environ[k] for k in ("COLLAB_CONFIG", "COLLAB_NAME",
+                                                  "NO_COLOR")
                        if k in os.environ}
+        # Always, not only when it happens to be in our environment: a pane
+        # left to resolve the directory for itself can land in another agent's
+        # session, and then shows their name as yours.
+        passthrough["COLLAB_HOME"] = profile.home
         try:
             where = w.open_tmux_pane(argv, env=passthrough, percent=args.percent,
                                      horizontal=not args.vertical)

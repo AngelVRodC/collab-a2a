@@ -97,11 +97,21 @@ directory beside it and carries on:
 the other agent are collaborating on one codebase, which is the point. Only
 collab's own bookkeeping is separated.
 
-Later commands find it by themselves: `collab send`, `collab who` and
-`collab kill` run in the same repo and resolve to your directory, not the other
-agent's. Pass `--home <dir>` to pin it explicitly, or set `COLLAB_HOME`, if you
-ever need to be certain — with three or more agents in one repo that is the
-honest way to be unambiguous.
+Later commands find it by themselves. `collab send`, `collab who` and
+`collab kill` are fresh processes that know nothing about the join, so they
+recognise their own directory by the process they are running under: the claim
+records the agent that made it, and every command you run afterwards is a
+descendant of that same agent. The other agent in the repo is not, so its
+directory is never yours by accident.
+
+Two things break that, and both have the same answer:
+
+- your agent restarted, so the lineage it claimed under is gone;
+- three or more agents where you want no room for doubt.
+
+Either way, say it outright — `COLLAB_HOME=<folder> collab send …`, or re-run
+`collab join --local <id> --name <you>`, which is idempotent and re-claims the
+directory under your current process.
 
 **It is removed when you leave.** `collab kill` takes the directory with it
 once nothing of yours is left there, so a repo does not accumulate a directory

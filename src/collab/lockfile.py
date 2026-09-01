@@ -39,6 +39,42 @@ def lock_path(home: Path | str | None = None) -> Path:
     return Path(home) / LOCK_NAME
 
 
+def _parent_of(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            data = fh.read()
+        # The command name can contain spaces and brackets, so ppid is read
+        # from after the last ')' rather than by splitting the whole line.
+        return int(data[data.rindex(")") + 2:].split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import subprocess
+
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=2, check=False)
+        return int(out.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def ancestry(limit: int = 12) -> list[int]:
+    """This process and its forebears, nearest first.
+
+    Two agents on one machine cannot be told apart by name — they resolve the
+    same default, which is why they collide in the first place. What does
+    differ is where they are running from: every command an agent issues is a
+    descendant of that agent's own process, and of nothing the other agent
+    owns. So the chain is the identity.
+    """
+    chain: list[int] = []
+    current: int | None = os.getpid()
+    while current and current > 1 and len(chain) < limit:
+        chain.append(current)
+        current = _parent_of(current)
+    return chain
+
+
 def _alive(pid: int) -> bool:
     if not pid:
         return False
@@ -60,6 +96,10 @@ class Lock:
     state_dir: str = ""          # set when this agent has its own
     hub_pid: int = 0
     listener_pid: int = 0
+    #: The process chain that claimed it, nearest first. A later command from
+    #: the same agent shares one of these; a command from the other agent in
+    #: the repo shares none of them, or only something far above both.
+    owner_pids: list[int] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -82,6 +122,18 @@ class Lock:
 
     def age(self) -> float:
         return max(time.time() - self.created_at, 0.0)
+
+    def claimed_by(self, chain: list[int]) -> int | None:
+        """How closely this lock belongs to the process chain given.
+
+        Returns the distance to the nearest shared forebear, or None. Distance
+        matters when two agents were started from one terminal: both chains
+        then meet at that shell, but each meets its *own* agent first.
+        """
+        for distance, pid in enumerate(chain):
+            if pid in self.owner_pids:
+                return distance
+        return None
 
     def describe(self) -> str:
         where = f" in {Path(self.state_dir).name}" if self.state_dir else ""

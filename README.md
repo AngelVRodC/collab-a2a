@@ -482,10 +482,25 @@ repo are collaborating on one codebase, and only collab's bookkeeping needs to
 be apart. The directory ignores itself, so `git status` stays clean.
 
 **Later commands find it.** `collab send` runs as a fresh process with no
-memory of the join, so the directory is resolved from what is on disk: the
-default one unless its lock is held by someone else, and then the one
-per-agent directory whose lock is live. With three or more agents that is
-genuinely ambiguous, so pass `--home <dir>` or set `COLLAB_HOME`.
+memory of the join, so ownership is read from the claim itself. Names cannot
+decide it — two agents on one machine resolve the same default name, which is
+why they collide in the first place — so the lock records the **process chain**
+that took it, and a command belongs to the directory whose claim its own
+lineage meets first.
+
+That last part matters: two agents started from one terminal share everything
+above that terminal, so "shares an ancestor" would answer yes for every claim
+in the repo. Each agent meets *its own* process before it meets anything held
+in common, so the nearest match wins and an equal match decides nothing.
+
+An earlier version guessed instead — if exactly one per-agent directory was in
+use, it assumed that one was ours. For the agent holding the default directory
+that was precisely backwards: every bare command it ran resolved into the other
+agent's state, sending messages under their name and stopping their listener.
+
+If the lineage is gone — your agent restarted since joining — say which you
+mean with `COLLAB_HOME=<folder>`, or re-run `collab join --local <id> --name
+<you>`, which reattaches and re-claims the directory under the new process.
 
 **It leaves when you do.** `collab kill` removes the per-agent directory once
 nothing of yours remains in it. A directory that hosts a session is kept —

@@ -120,29 +120,73 @@ def _held_by(home: Path) -> Any:
     return lock if (lock is not None and lock.held) else None
 
 
+def candidate_homes(cwd: Path | None = None) -> list[Path]:
+    """Every directory in this repo that holds a collab claim.
+
+    Not only `.collab-*`: a folder somebody named themselves with `--home` is
+    just as much theirs, and must not be handed to the next agent along.
+    """
+    from . import lockfile
+
+    base = base_home(cwd)
+    found = [base]
+    try:
+        for child in sorted(base.parent.iterdir()):
+            if child != base and child.is_dir() \
+                    and (child / lockfile.LOCK_NAME).exists():
+                found.append(child)
+    except OSError:
+        pass
+    return found
+
+
 def resolve_home(name: str = "", cwd: Path | None = None) -> Path:
     """Which state directory this invocation should use.
 
-    The default one unless another agent is holding it. Beyond that the answer
-    has to be findable by a *later* command — `collab send` runs as a fresh
-    process with no memory of the join — so it is derived from what is on disk
-    rather than from anything the first command kept to itself.
+    A later command — `collab send`, minutes after the join, as a fresh
+    process — has to reach the same directory the join chose, and must not
+    reach the other agent's. Names cannot decide it: two agents on one machine
+    resolve the same default name, which is why they collided to begin with.
+    Their process trees do differ, so ownership is read from there.
+
+    An earlier version guessed instead: if exactly one per-agent directory was
+    in use, it assumed that one was ours. For the agent holding the *default*
+    directory that was precisely backwards — every bare command it ran was
+    redirected into the other agent's state, where it sent messages under their
+    name and stopped their listener.
     """
+    from . import lockfile
+
     base = base_home(cwd)
+    chain = lockfile.ancestry()
+
+    # Two agents started from one terminal share everything above that
+    # terminal, so "shares an ancestor" is not ownership — every claim in the
+    # repo would answer yes. What separates them is *how far up* the sharing
+    # begins: an agent meets its own process before it meets anything it has
+    # in common with the other, so the nearest match wins and a tie is not a
+    # match at all.
+    ranked: list[tuple[int, Path]] = []
+    for home in candidate_homes(cwd):
+        lock = _held_by(home)
+        if lock is None:
+            continue
+        distance = lock.claimed_by(chain)
+        if distance is not None:
+            ranked.append((distance, home))
+    ranked.sort(key=lambda pair: pair[0])
+    if ranked and (len(ranked) == 1 or ranked[0][0] < ranked[1][0]):
+        return ranked[0][1]
+
     held = _held_by(base)
     if held is None:
         return base
     if name and held.name == name:
         return base                      # the claim on it is ours
-
     if name:
         return agent_home(name, cwd)
-
-    # No name to go on. If exactly one per-agent directory is in use, it is
-    # unambiguous: the default is somebody else's and that one is ours.
-    live = [d for d in sibling_homes(cwd) if _held_by(d) is not None]
-    if len(live) == 1:
-        return live[0]
+    # Nothing here proves which agent is asking, so answer with the repo's own
+    # directory rather than guessing at somebody else's.
     return base
 
 
