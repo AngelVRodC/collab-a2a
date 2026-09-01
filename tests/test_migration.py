@@ -165,3 +165,21 @@ def test_a_current_database_is_untouched(tmp_path):
         assert reopened.participants()[0].id == original
     finally:
         reopened.close()
+
+
+def test_an_old_session_still_ends_up_in_wal(old_db):
+    """The pragma used to run after the migration, and quietly lose.
+
+    The back-fills in ``_migrate`` are DML, so sqlite3 has an implicit
+    transaction open by the time the pragma runs, and ``journal_mode`` cannot
+    change inside one.  It fails silently rather than raising, so a migrated
+    session kept the rollback journal for the rest of its life while a fresh
+    one got WAL — losing the concurrency that lets a hub and a `collab
+    sessions` in another terminal touch the same file.
+    """
+    store = Store(old_db)
+    try:
+        mode = store._db.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        store.close()
+    assert mode == "wal", "a migrated session must get WAL like a fresh one"
