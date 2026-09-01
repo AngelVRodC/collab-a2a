@@ -165,6 +165,23 @@ class Store:
                     (row["name"], pid, now),
                 )
 
+        # A name freed by `collab kick` was still held by the revoked row, and
+        # `participants.name` is UNIQUE — so rejoining under a name you had
+        # used before raised IntegrityError inside the request and reached the
+        # agent as a bare HTTP 500. Sessions already carrying those rows would
+        # keep refusing those names for as long as they live, so the names are
+        # released here rather than only for sessions started from now on.
+        if self._columns("participants"):
+            freed = self._db.execute(
+                "SELECT id, name FROM participants WHERE revoked = 1"
+                " AND name NOT LIKE '%~%'"
+            ).fetchall()
+            for row in freed:
+                self._db.execute(
+                    "UPDATE participants SET name = ? WHERE id = ?",
+                    (f"{row['name']}~{str(row['id'])[2:10]}", row["id"]),
+                )
+
         # Events carried names only. Resolve them to the ids just assigned, so
         # old direct messages stay visible to exactly the two people involved.
         events = self._columns("events")
@@ -252,6 +269,25 @@ class Store:
 
     # --- participants --------------------------------------------------------
 
+    def _retire_name(self, name: str) -> None:
+        """Take a freed name off a participant who no longer holds it.
+
+        `participants.name` is UNIQUE, and a revoked row keeps occupying its
+        name. Every rule above this says such a name is available again — the
+        join check, the suffixing loop, the documentation — so the row is the
+        only thing that disagrees, and it disagrees by raising IntegrityError
+        from inside a request, which reaches the agent as a bare HTTP 500.
+
+        The retired name keeps the original plus the participant's own id, so
+        the roster history stays readable and no two retirements collide.
+        """
+        self._db.execute(
+            "UPDATE participants SET name = name || '~' || substr(id, 3, 8)"
+            " WHERE name = ? AND revoked = 1",
+            (name,),
+        )
+
+
     def add_participant(self, name: str, token: str, *, is_host: bool = False,
                         meta: dict[str, Any] | None = None) -> Participant:
         """Insert a participant, suffixing the name if it is already taken."""
@@ -268,12 +304,25 @@ class Store:
             ).fetchone():
                 final = f"{name}-{n}"
                 n += 1
-            self._db.execute(
-                "INSERT INTO participants (id, name, token_hash, is_host, joined_at,"
-                " last_seen, meta) VALUES (?,?,?,?,?,?,?)",
-                (pid, final, token_hash(token), int(is_host), now, now,
-                 json.dumps(meta or {})),
-            )
+            # Whoever was removed from it does not hold it any more.
+            self._retire_name(final)
+            try:
+                self._db.execute(
+                    "INSERT INTO participants (id, name, token_hash, is_host,"
+                    " joined_at, last_seen, meta) VALUES (?,?,?,?,?,?,?)",
+                    (pid, final, token_hash(token), int(is_host), now, now,
+                     json.dumps(meta or {})),
+                )
+            except sqlite3.IntegrityError:
+                # Whatever we did not foresee, a join must not end as a 500.
+                # A suffixed name is a small surprise; a stack trace is not.
+                final = f"{name}-{pid[2:8]}"
+                self._db.execute(
+                    "INSERT INTO participants (id, name, token_hash, is_host,"
+                    " joined_at, last_seen, meta) VALUES (?,?,?,?,?,?,?)",
+                    (pid, final, token_hash(token), int(is_host), now, now,
+                     json.dumps(meta or {})),
+                )
             self._db.execute(
                 "INSERT OR REPLACE INTO participant_names (name, participant_id,"
                 " claimed_at) VALUES (?,?,?)",
@@ -377,6 +426,9 @@ class Store:
             ).fetchone():
                 final = f"{new}-{n}"
                 n += 1
+            # The same freed-name hazard as joining: a revoked row still
+            # occupies the name, and this column is UNIQUE.
+            self._retire_name(final)
             self._db.execute(
                 "UPDATE participants SET name=? WHERE id=?", (final, participant_id)
             )
