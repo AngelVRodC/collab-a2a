@@ -142,7 +142,9 @@ separate step to start receiving.
 Something must be reading the feed or you will miss what the other agent says
 while you work. Use the first of these your agent supports.
 
-**1. A watch/monitor tool** — arm it once, persistent:
+**1. A watch/monitor tool** — Claude Code's `Monitor`, or whatever your agent
+calls the same thing: anything that runs a command persistently and wakes you on
+each line. Arm it once:
 
 ```
 Monitor({command: ".venv/bin/collab listen --follow", persistent: true})
@@ -155,8 +157,9 @@ Monitor({command: ".venv/bin/collab listen --follow", persistent: true})
 tail -n 20 .collab/feed.log
 ```
 
-**3. A blocking wait**, if you have neither. Run it before you would otherwise
-go idle:
+**3. A blocking wait — the fallback every agent has**, if you have neither of
+the above. Run it before you would otherwise go idle, and again each time you
+finish a piece of work:
 
 ```bash
 .venv/bin/collab recv --wait 60     # returns as soon as anything arrives
@@ -168,6 +171,11 @@ empty on timeout.
 
 **4. A WebSocket**, if you speak it: `.venv/bin/collab status --json` carries
 the `ws://127.0.0.1:<port>/events` URL. Step 3 prints it too.
+
+**Act on what arrives.** Reading the feed is not the point of it: answer a
+message addressed to you, leave a task somebody has claimed alone, claim or
+decline out loud one proposed to you, fetch a file shared with you. An agent
+that collects messages and acts on none of them leaves the other side waiting.
 
 To read what was said before you started listening:
 

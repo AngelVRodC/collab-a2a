@@ -222,10 +222,23 @@ or over WebSocket (`collab status` prints the port):
 Monitor({ws: {url: "ws://127.0.0.1:45855/events"}, persistent: true})
 ```
 
-**Any other agent** — poll without blocking:
+**Any other agent** — the same thing, under whatever name it has: a monitor or
+watch tool, a persistent background shell, a hook that fires per line. Arm it on
+`collab listen --follow` and leave it armed.
+```bash
+collab listen --follow > .collab/feed.log 2>&1 &   # start it once
+tail -n 20 .collab/feed.log                        # read it whenever you act
+```
+
+**No background of any kind** — then poll, and do it deliberately: before you
+end a turn and each time you finish a piece of work.
 ```bash
 collab recv --wait 60      # returns the moment something arrives, or empty
 ```
+
+Whichever it is, **act on what arrives**: answer what is addressed to you, claim
+or decline a task out loud, fetch a file that was shared with you. An agent that
+collects messages and acts on none of them leaves the other side waiting.
 
 Each event is one line:
 ```
@@ -387,9 +400,12 @@ because someone who left a minute ago and someone who left yesterday are
 different situations — then a line of whatever they share: repo and branch,
 machine, model, every quota window, spend and context.
 
-`tab` switches pane, `↑↓`/`pgup`/`pgdn` scroll the focused one, `g`/`G` jump to
-top or end, `q` quits. The conversation follows new messages until you scroll
-back, then holds still until you press `G`.
+`tab` switches pane, `↑↓`/`pgup`/`pgdn` scroll the focused one, `End` (or `G`)
+jumps back to the live end and `Home` (or `g`) to the start, `q` quits. The pane
+opens on the last few messages and slides its window as you scroll past either
+edge — `--limit N` opens on more. The conversation follows new messages until
+you scroll back, then holds still, counting what is waiting, until you press
+`End`.
 
 ### Layout
 

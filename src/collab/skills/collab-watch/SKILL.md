@@ -123,11 +123,21 @@ pointer is over — the roster at the top, the conversation below.
 | `tab` | move focus between the panes |
 | `↑` `↓` `k` `j` | scroll the focused pane |
 | `[` `]` | scroll the roster without leaving the conversation |
-| `g` `G` | jump to the top / back to the live end |
+| `pgup` `pgdn` `ctrl-u` `ctrl-d` | a page, or half a page, at a time |
+| `End` `G` | back to the live end, from wherever you are |
+| `Home` `g` | the start of the conversation |
 | `q` | quit the viewer (the session keeps running) |
 
-The conversation follows new messages until you scroll back; `G` resumes
-following. The roster header shows `▴▾` when there is more above or below.
+The conversation follows new messages until you scroll back; `End` (or `G`)
+resumes following, and while you are away the footer says how many messages are
+waiting below. The roster header shows `▴▾` when there is more above or below.
+
+**History is not all loaded at once.** The pane opens on the last few messages
+and holds a window of them — what is loaded is what it costs to draw, so the
+window is bounded and the log on disk is not. Scrolling past either edge slides
+it, a page at a time; `Home` and `End` go to the ends directly. The header says
+`older above` while there is more behind you. `collab watch --limit N` opens on
+more of it if you would rather start further back.
 
 ## What the roster tells you
 

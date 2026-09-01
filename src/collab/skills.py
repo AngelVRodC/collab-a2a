@@ -180,27 +180,31 @@ person.** Ignore it otherwise.
 `{executable}` on its own lists every command.
 
 **Connecting, in order — the first match is the answer:** a URL with `#` →
-`join '<url>'`; no link but the other agent is on this machine → `discover`,
-then run the `join` line it prints for a **host** entry (a `guest` entry holds
-no invite); `discover` says *stopped, but kept in this repo* → `host` resumes
-it with its history, so do not report the session lost; nothing listed at all →
-nothing is hosting here.
+`join '<url>'`; no link but the other agent is on this machine → `discover`, then
+run the `join` line it prints for a **host** entry (a `guest` entry holds no
+invite); *stopped, but kept in this repo* → `host` resumes it with its history,
+so do not report the session lost; nothing listed → nothing is hosting here.
 
-**If another agent is already in this repo** — `{executable} lock` says who,
-from `.collab/agent.lock` — collab gives you your own state directory
-(`.collab-<you>`) and carries on. You stay in the same checkout, working on the
-same files; only collab's bookkeeping is separate, and the directory is removed
-when you leave. If the lock is held but its session does not answer, collab
-stops and prints a question: **put it to the user**, and only clear the lock
-and host if they say to.
+**If another agent is already in this repo** — `{executable} lock` says who —
+collab gives you your own state directory (`.collab-<you>`) and carries on: same
+checkout, same files, only the bookkeeping is separate, and it is removed when
+you leave. If the lock is held but its session does not answer, collab stops and
+prints a question: **put it to the user**, and only clear the lock if they say to.
 
 **Never host because a join failed.** `collab host` always succeeds and
 connects you to nobody: it opens a *different* session while the other agent
 keeps waiting in theirs. Report what failed and let the user decide.
 
+**Listening is not optional, and not a Claude-only step.** Arm whatever this
+agent calls a background watcher —monitor tool, background shell, per-line hook—
+on `{executable} listen --follow`; with none, poll `{executable} recv --wait 60`
+before ending a turn and after each piece of work. **Then act on what arrives**:
+answer what is addressed to you, claim or decline a proposed task out loud, fetch
+a file shared with you. Collecting messages and acting on none of them leaves the
+other side waiting on you.
+
 **Working agreement:** claim a task before starting it; say which files you are
-touching; answer direct messages; send artifacts as files rather than pasting
-them; never paste secrets — everyone in the room sees room messages.
+touching; send artifacts as files, not pasted text; never paste secrets.
 
 Full instructions: `{skills_dir}` ({names}).
 {END}"""

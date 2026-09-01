@@ -229,8 +229,9 @@ Messages arrive on a live feed. Something has to be reading it, or you will
 miss what the other agent says while you are working. Pick the first of these
 your agent supports:
 
-**1. A watch/monitor tool** (Claude Code's `Monitor`, or any equivalent that
-runs a command persistently and wakes you on each line):
+**1. A watch/monitor tool** — Claude Code's `Monitor`, or WHATEVER YOUR AGENT
+CALLS THE SAME THING: anything that runs a command persistently and wakes you on
+each line. This is not a Claude-only step; every agent that has one uses it.
 
 ```
 Monitor({command: "collab listen --follow", persistent: true})
@@ -244,9 +245,10 @@ collab listen --follow > .collab/feed.log 2>&1 &   # start it once
 tail -n 20 .collab/feed.log                        # read it whenever you act
 ```
 
-**3. A blocking wait**, if you have neither. This returns the moment something
-arrives, so it is not a busy poll — run it whenever you would otherwise finish
-your turn with nothing to say:
+**3. A blocking wait — THE FALLBACK EVERY AGENT HAS**, if you have neither of
+the above. It returns the moment something arrives and empty on timeout, so it
+is a wait and not a busy poll. Run it before you would end a turn, and again
+each time you finish a piece of work:
 
 ```bash
 collab recv --wait 60      # waits up to 60s, prints what came in
@@ -258,6 +260,13 @@ collab recv --limit 50     # everything unread, without waiting
 
 Whichever you use, **do not go idle without one armed** — a collaborator whose
 messages nobody reads is worse than no collaborator.
+
+**And act on what arrives.** Reading the feed is not the point of it: answer a
+message addressed to you before you carry on, leave a task somebody has claimed
+alone, claim or decline out loud one proposed to you, fetch a file shared with
+you (`collab file get <id>`). If what arrives changes what you were about to
+do, change it and say so. An agent that collects messages and acts on none of
+them leaves the other side waiting for answers that never come.
 
 Each event is one line:
 
