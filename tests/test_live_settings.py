@@ -20,20 +20,36 @@ from collab.client import tui
 
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
-    """A throwaway global config, so the user's own is never touched."""
+    """A throwaway global config and themes folder.
+
+    The folder is redirected as well as the config file. `set_theme` refuses a
+    name `theme_names()` does not know, and `theme_names()` reads the themes
+    folder — so left pointing at the real one, whether these tests pass would
+    depend on which .md files the person running them happens to keep in
+    ~/.config/collab/themes.
+
+    `other` exists so there is a second name to switch to: `classic` is the
+    only theme that ships, and a test that moves between two themes needs two.
+    """
     path = tmp_path / "config.json"
+    folder = tmp_path / "themes"
+    folder.mkdir()
+    (folder / "other.md").write_text("---\nlayout: bubbles\n---\n", encoding="utf-8")
     monkeypatch.setattr(config, "global_config_path", lambda: path)
+    monkeypatch.setattr(themes, "user_themes_dir", lambda home=None: folder)
+    themes._MD_CACHE.clear()
     config._CACHE.clear()
     yield path
     config._CACHE.clear()
+    themes._MD_CACHE.clear()
 
 
 # --- the config is re-read when the file changes ----------------------------
 
 def test_a_change_from_outside_is_seen_without_restarting(cfg):
     """Another process writes the config; this one reads it knowing nothing."""
-    config.set_theme("chat")
-    assert config.theme() == "chat"
+    config.set_theme("other")
+    assert config.theme() == "other"
     cfg.write_text(json.dumps({"theme": "classic"}), encoding="utf-8")
     assert config.theme() == "classic", "the cache kept the old value"
 
@@ -41,7 +57,7 @@ def test_a_change_from_outside_is_seen_without_restarting(cfg):
 def test_two_changes_in_the_same_second_are_not_lost(cfg):
     """mtime has one-second resolution on some filesystems.
 
-    `collab color #008080 && collab theme chat` lands inside the same second
+    `collab color #008080 && collab theme classic` lands inside the same second
     without trying. If the stamp were mtime alone, the second change would be
     lost.
     """
@@ -53,7 +69,7 @@ def test_two_changes_in_the_same_second_are_not_lost(cfg):
 
 def test_the_file_is_not_re_read_when_nothing_changed(cfg, monkeypatch):
     """The other half: reading four settings per frame cannot mean disk."""
-    config.set_theme("chat")
+    config.set_theme("other")
     config.theme()                                   # fills the cache
     reads = []
     real = type(cfg).read_text
@@ -69,7 +85,7 @@ def test_the_file_is_not_re_read_when_nothing_changed(cfg, monkeypatch):
 
 def test_a_user_theme_can_be_selected(cfg, tmp_path, monkeypatch):
     """Resolving one without being able to choose it left the folder as decoration."""
-    folder = tmp_path / "themes"
+    folder = tmp_path / "own-themes"          # its own, not the fixture's
     folder.mkdir()
     (folder / "mine.md").write_text("---\nlayout: bubbles\n---\n", encoding="utf-8")
     monkeypatch.setattr(themes, "user_themes_dir", lambda home=None: folder)

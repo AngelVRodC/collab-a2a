@@ -431,7 +431,7 @@ is painted: `$DEFAULT_COLOR` `$SPEAKER` `$TEXT` `$GOOD` `$BAD` `$WARN`
 
 
 def all_themes(folder: Path | None = None) -> dict[str, dict[str, Any]]:
-    """The two built-in ones plus the .md files in the folder.
+    """The built-in one plus the .md files in the folder.
 
     The folder wins: whoever just wrote a file expects what that file says to be
     what happens, even when it is named after a built-in one.
