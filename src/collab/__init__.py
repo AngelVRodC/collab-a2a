@@ -1,3 +1,3 @@
 """collab — an A2A hub for coding agents."""
 
-__version__ = "1.20.2"
+__version__ = "1.21.0"
