@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from collab import themes
+from collab.client import tui
 from collab.config import SessionProfile
 from collab.server.app import create_app
 from collab.server.auth import new_secret
@@ -27,9 +29,6 @@ def profile(tmp_path, monkeypatch):
 @pytest.fixture()
 def folder(tmp_path, monkeypatch):
     """An empty themes folder, with both theme caches cleared around it."""
-    from collab import themes
-    from collab.client import tui
-
     d = tmp_path / "themes"
     d.mkdir()
     monkeypatch.setattr(themes, "user_themes_dir", lambda home=None: d)

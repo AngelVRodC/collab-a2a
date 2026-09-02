@@ -15,8 +15,12 @@ dependencies = [
     "uvicorn>=0.30",
     "httpx>=0.28.1",
     "httpx-sse>=0.4",
-    "python-multipart>=0.0.9",
-    "websockets>=12",
+    # fastapi and starlette both require >=0.0.18 for the form parser this
+    # app's file upload goes through; nothing else in the chain pins it.
+    "python-multipart>=0.0.18",
+    # client/bridge.py imports websockets.asyncio.server, which does not exist
+    # before 13.0 and is the default implementation from 14.0.
+    "websockets>=14",
 ]
 
 [project.optional-dependencies]

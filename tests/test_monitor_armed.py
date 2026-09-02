@@ -23,19 +23,14 @@ import time
 import pytest
 
 from collab.client import daemon as d
-from collab.config import SessionProfile
 
 
 @pytest.fixture()
-def profile(tmp_path):
-    home = tmp_path / "collab"
-    (home / "sessions" / "s").mkdir(parents=True)
-    p = SessionProfile(session_id="s", url="http://h/", name="edith",
-                       host_name="jarvis", token="t", home=str(home))
-    p.save()
-    (p.dir / "status.json").write_text(json.dumps(
+def profile(profile):
+    """The shared profile, already reporting a live daemon."""
+    (profile.dir / "status.json").write_text(json.dumps(
         {"state": "live", "heartbeat": time.time()}))
-    return p
+    return profile
 
 
 # --- the register -----------------------------------------------------------

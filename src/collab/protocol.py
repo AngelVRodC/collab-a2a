@@ -54,6 +54,23 @@ def short_state(state: str) -> str:
     return str(state).replace("TASK_STATE_", "").lower()
 
 
+def task_line(body: dict[str, Any]) -> str:
+    """«claim t_1 “ship it” [working] · alice» — one task envelope, on one line.
+
+    The TUI and the watcher render a task identically and have to go on doing
+    so; all that differs is what each does with the line afterwards — one wraps
+    it to a width, the other paints it. Beside `short_state` for the same
+    reason: neither renderer can import the other.
+
+    `Envelope.render_line` deliberately does NOT use this. It writes the sender
+    into the line and has no surrounding layout to lean on, so it says more.
+    """
+    state = short_state(body.get("state", ""))
+    owner = f" · {body['owner']}" if body.get("owner") else ""
+    return (f"{body.get('action', '')} {body.get('id', '')} "
+            f"“{body.get('title', '')}” [{state}]{owner}")
+
+
 #: Files are shared out of band rather than pasted as text, so binaries and
 #: build artifacts never have to be squeezed through a chat message.
 MAX_FILE_BYTES = 10 * 1024 * 1024

@@ -37,7 +37,7 @@ from ..protocol import (
     KIND_HELLO,
     KIND_PRESENCE,
     KIND_TASK,
-    short_state,
+    task_line,
 )
 from .. import activity, peers
 from .. import themes
@@ -999,11 +999,7 @@ def _body_lines(env: Envelope, width: int) -> list[str]:
     if env.kind == KIND_PRESENCE:
         return _wrap(str(env.body.get("event", "")), width)
     if env.kind == KIND_TASK:
-        b = env.body
-        state = short_state(b.get("state", ""))
-        owner = f" · {b['owner']}" if b.get("owner") else ""
-        return _wrap(f"{b.get('action','')} {b.get('id','')} "
-                     f"“{b.get('title','')}” [{state}]{owner}", width)
+        return _wrap(task_line(env.body), width)
     if env.kind == KIND_FILE:
         b = env.body
         if b.get("action") == "received":

@@ -27,7 +27,7 @@ from ..protocol import (
     KIND_HELLO,
     KIND_PRESENCE,
     KIND_TASK,
-    short_state,
+    task_line,
 )
 from .inbox import Inbox
 
@@ -102,10 +102,7 @@ def format_event(env: Envelope, *, me: str | None = None, width: int = 80) -> st
         return f"{when} {who} {mark} {_paint(said, tone if _color_enabled() else '')}"
 
     if env.kind == KIND_TASK:
-        b = env.body
-        state = short_state(b.get("state", ""))
-        owner = f" · {b['owner']}" if b.get("owner") else ""
-        line = f"{b.get('action', '')} {b.get('id', '')} “{b.get('title', '')}” [{state}]{owner}"
+        line = task_line(env.body)
         return f"{when} {who} {mark} {_paint(line, BOLD if _color_enabled() else '')}"
 
     if env.kind == KIND_FILE:

@@ -6,8 +6,6 @@ display name breaks the moment someone changes theirs.
 
 from __future__ import annotations
 
-import pytest
-
 
 def _join(client, session, name):
     r = client.post("/ext/collab/v1/join",

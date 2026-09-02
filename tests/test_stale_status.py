@@ -14,21 +14,7 @@ from __future__ import annotations
 import json
 import time
 
-import pytest
-
 from collab.client import daemon as d
-from collab.config import SessionProfile
-
-
-@pytest.fixture()
-def profile(tmp_path):
-    home = tmp_path / "collab"
-    session = home / "sessions" / "s"
-    session.mkdir(parents=True)
-    p = SessionProfile(session_id="s", url="http://h/", name="edith",
-                       host_name="jarvis", token="t", home=str(home))
-    p.save()
-    return p
 
 
 def _wrote(profile, **status):

@@ -31,24 +31,12 @@ import pytest
 from collab import cli
 from collab.client import daemon as d
 from collab.client import exclusive, onboard
-from collab.config import SessionProfile
 
 HAVE_PROC = os.path.isdir("/proc/self")
 
 #: Sleeps under a command line that names the daemon module and a session, so
 #: that `argv` has something true to find whichever way it reads it.
 _SLEEPER = "import time; time.sleep(30)"
-
-
-@pytest.fixture()
-def profile(tmp_path, monkeypatch):
-    monkeypatch.setenv("COLLAB_PEERS_DIR", str(tmp_path / "peers"))
-    home = tmp_path / "collab"
-    (home / "sessions" / "s_platform").mkdir(parents=True)
-    p = SessionProfile(session_id="s_platform", url="http://h/", name="edith",
-                       host_name="jarvis", token="t", home=str(home))
-    p.save()
-    return p
 
 
 @pytest.fixture()

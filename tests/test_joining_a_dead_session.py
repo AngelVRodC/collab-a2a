@@ -21,7 +21,6 @@ import pytest
 from collab import cli
 from collab.client import exclusive, onboard
 from collab.client.hub_client import HubError
-from collab.config import SessionProfile
 
 
 def _wrote(profile, **status):
