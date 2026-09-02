@@ -49,11 +49,6 @@ def bundled_skills_dir() -> Path | None:
     return bundled if (bundled / "collab-host" / "SKILL.md").exists() else None
 
 
-def claude_skills_dir() -> Path:
-    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
-    return base / "skills"
-
-
 BEGIN = "<!-- >>> COLLAB (managed by `collab skills install`) — do not edit by hand -->"
 END = "<!-- <<< COLLAB -->"
 BLOCK_RE = re.compile(r"\n?<!-- >>> COLLAB .*?-->.*?<!-- <<< COLLAB -->\n?", re.DOTALL)

@@ -45,17 +45,6 @@ _LINGERS = (
 HAVE_PROC = os.path.isdir("/proc/self")
 
 
-@pytest.fixture()
-def profile(tmp_path, monkeypatch):
-    monkeypatch.setenv("COLLAB_PEERS_DIR", str(tmp_path / "peers"))
-    home = tmp_path / "collab"
-    (home / "sessions" / "s").mkdir(parents=True)
-    p = SessionProfile(session_id="s", url="http://h/", name="edith",
-                       host_name="jarvis", token="t", home=str(home))
-    p.save()
-    return p
-
-
 def _record(profile, pid, began=""):
     (profile.dir / "daemon.pid").write_text(f"{pid}\n{began}\n")
 

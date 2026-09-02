@@ -27,6 +27,7 @@ from ..protocol import (
     KIND_HELLO,
     KIND_PRESENCE,
     KIND_TASK,
+    short_state,
 )
 from .inbox import Inbox
 
@@ -102,7 +103,7 @@ def format_event(env: Envelope, *, me: str | None = None, width: int = 80) -> st
 
     if env.kind == KIND_TASK:
         b = env.body
-        state = str(b.get("state", "")).replace("TASK_STATE_", "").lower()
+        state = short_state(b.get("state", ""))
         owner = f" · {b['owner']}" if b.get("owner") else ""
         line = f"{b.get('action', '')} {b.get('id', '')} “{b.get('title', '')}” [{state}]{owner}"
         return f"{when} {who} {mark} {_paint(line, BOLD if _color_enabled() else '')}"

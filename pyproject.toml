@@ -17,14 +17,12 @@ dependencies = [
     "httpx-sse>=0.4",
     "python-multipart>=0.0.9",
     "websockets>=12",
-    "rich>=13",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "anyio>=4",
 ]
 
 [project.scripts]

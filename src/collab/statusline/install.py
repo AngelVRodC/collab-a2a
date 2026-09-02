@@ -79,25 +79,6 @@ def build_block(executable: str, *, separator: bool) -> str:
     )
 
 
-def _has_other_segments(body: str) -> bool:
-    """Does anything besides scaffolding actually print here?
-
-    The shebang, the shared stdin capture, comments and blank lines are not
-    output, so none of them count.
-    """
-    stripped = BLOCK_RE.sub("", body)
-    for raw in stripped.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("#!"):
-            continue
-        if STDIN_CAPTURE_RE.match(raw) or line in ("input=$(cat)", "INPUT=$(cat)"):
-            continue
-        return True
-    return False
-
-
 @dataclass
 class InstallResult:
     action: str

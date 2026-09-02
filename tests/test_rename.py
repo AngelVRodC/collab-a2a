@@ -85,7 +85,6 @@ def test_a_dm_is_still_private_after_a_rename(client, session, host_headers):
     assert "private after rename" not in _texts(client, carol)
 
 
-@pytest.mark.anyio
 async def test_a_renamed_participant_is_still_reported_as_connected(session):
     """A stale roster shows everyone offline, which the status line reads as 'alone'.
 
@@ -138,8 +137,3 @@ def test_the_current_holder_of_a_name_wins(client, session, host_headers):
 
     assert "for the new bob" in _texts(client, second)
     assert "for the new bob" not in _texts(client, first)
-
-
-@pytest.fixture()
-def anyio_backend():
-    return "asyncio"

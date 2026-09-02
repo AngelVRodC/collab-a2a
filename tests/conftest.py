@@ -2,9 +2,42 @@ from __future__ import annotations
 
 import pytest
 
+from collab.config import SessionProfile
 from collab.server.app import create_app
 from collab.server.auth import new_secret
 from collab.server.store import Store
+
+
+@pytest.fixture()
+def profile(tmp_path, monkeypatch):
+    """A saved session profile in a home of its own.
+
+    Four test files wrote this same fixture out by hand. A client-side fixture
+    belongs here for the same reason the server-side ones below do.
+    """
+    monkeypatch.setenv("COLLAB_PEERS_DIR", str(tmp_path / "peers"))
+    home = tmp_path / "collab"
+    (home / "sessions" / "s").mkdir(parents=True)
+    p = SessionProfile(session_id="s", url="http://h/", name="edith",
+                       host_name="jarvis", token="t", home=str(home))
+    p.save()
+    return p
+
+
+@pytest.fixture()
+def folder(tmp_path, monkeypatch):
+    """An empty themes folder, with both theme caches cleared around it."""
+    from collab import themes
+    from collab.client import tui
+
+    d = tmp_path / "themes"
+    d.mkdir()
+    monkeypatch.setattr(themes, "user_themes_dir", lambda home=None: d)
+    themes._MD_CACHE.clear()
+    tui._THEME_CACHE.clear()
+    yield d
+    themes._MD_CACHE.clear()
+    tui._THEME_CACHE.clear()
 
 
 @pytest.fixture()

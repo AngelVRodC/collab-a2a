@@ -21,25 +21,11 @@ from __future__ import annotations
 import os
 import threading
 
-import pytest
-
 from collab.client import daemon as d
 from collab.client import exclusive
-from collab.config import SessionProfile
 
 PROBERS = 3
 PROBES = 2000
-
-
-@pytest.fixture()
-def profile(tmp_path, monkeypatch):
-    monkeypatch.setenv("COLLAB_PEERS_DIR", str(tmp_path / "peers"))
-    home = tmp_path / "collab"
-    (home / "sessions" / "s").mkdir(parents=True)
-    p = SessionProfile(session_id="s", url="http://h/", name="edith",
-                       host_name="jarvis", token="t", home=str(home))
-    p.save()
-    return p
 
 
 def _in_parallel(work, workers=PROBERS):

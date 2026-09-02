@@ -24,17 +24,6 @@ from collab.client.hub_client import HubError
 from collab.config import SessionProfile
 
 
-@pytest.fixture()
-def profile(tmp_path, monkeypatch):
-    monkeypatch.setenv("COLLAB_PEERS_DIR", str(tmp_path / "peers"))
-    home = tmp_path / "collab"
-    (home / "sessions" / "s").mkdir(parents=True)
-    p = SessionProfile(session_id="s", url="http://h/", name="edith",
-                       host_name="jarvis", token="t", home=str(home))
-    p.save()
-    return p
-
-
 def _wrote(profile, **status):
     """What the daemon left behind in its last write."""
     body = {"state": "live", "heartbeat": time.time(), "others_connected": 0,

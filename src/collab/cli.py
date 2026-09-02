@@ -58,7 +58,7 @@ from .config import (
 )
 from .client.context import gather as ctx_gather
 from .protocol import (DEFAULT_ROOM, MAX_FILE_BYTES, Envelope, KIND_CHAT,
-                       KIND_HELLO, scrub, scrub_block)
+                       KIND_HELLO, scrub, scrub_block, short_state)
 from .server.session import (HubConfig, create_session, hosted_sessions,
                              join_line, resume_session, session_summary,
                              stop_session)
@@ -265,7 +265,7 @@ def _print_snapshot(snapshot: dict[str, Any], me: str) -> None:
         for t in tasks:
             owner = scrub(str(t.get("owner"))) if t.get("owner") else dim("unclaimed")
             print(f"  {t['id']}  {scrub(str(t['title']))}  "
-                  f"[{_short_state(t['state'])}]  {owner}")
+                  f"[{short_state(t['state'])}]  {owner}")
 
     if recent := snapshot.get("recent"):
         heading("Recent")
@@ -288,10 +288,6 @@ def _ago_seconds(seconds: float) -> str:
     if seconds < 86400:
         return f"{int(seconds // 3600)}h ago"
     return f"{int(seconds // 86400)}d ago"
-
-
-def _short_state(state: str) -> str:
-    return state.replace("TASK_STATE_", "").lower()
 
 
 # --- commands -----------------------------------------------------------------
@@ -568,18 +564,6 @@ def _is_listening(profile: SessionProfile, status: dict[str, Any]) -> bool:
     return _effective(profile, status) == "live"
 
 
-def _lock_blocks_us(session_id: str = "") -> "lockfile.Lock | None":
-    """The lock held by *another* agent, if there is one.
-
-    Our own session's lock is not somebody else being here — re-running join
-    for a session we are already in must not be read as a collision.
-    """
-    held = lockfile.holder()
-    if held is None or (session_id and held.session_id == session_id):
-        return None
-    return held
-
-
 def _lock_says_here_but_nothing_answers(lock: "lockfile.Lock") -> bool:
     """A held lock whose session cannot be reached. Ask; do not decide.
 
@@ -779,24 +763,6 @@ def _own_state_dir(args: argparse.Namespace, name: str) -> int | None:
     return None
 
 
-def _state_dir_note(profile: SessionProfile) -> None:
-    """Say how later commands will find this session, when it is not the default."""
-    home = Path(profile.home)
-    if home.name == COLLAB_DIRNAME:
-        return
-    print(dim(f"       later commands here find {home.name} on their own;"
-              f" force it with COLLAB_HOME={home}"))
-
-    # The worktree was made and the join still failed. If a lock is what sent
-    # us here and the session behind it does not answer, that is the one
-    # ambiguity worth a question.
-    if lock is not None and lock.held and not _reachable(lock.url):
-        if not _lock_says_here_but_nothing_answers(lock):
-            return completed.returncode
-        lockfile.release()
-        ok("lock cleared — hosting here instead, as asked")
-        return cmd_host(_host_args_from(args))
-    return completed.returncode
 def _publish_global_settings(profile: SessionProfile) -> None:
     """Publish what you already had set, as soon as there is a session to take it.
 
@@ -1169,7 +1135,7 @@ def cmd_task(args: argparse.Namespace) -> int:
                 for t in tasks:
                     owner = said(t.get("owner")) or dim("unclaimed")
                     print(f"  {said(t['id'])}  {said(t['title'])}  "
-                          f"[{_short_state(t['state'])}]  {owner}")
+                          f"[{short_state(t['state'])}]  {owner}")
                 return 0
             if args.action == "show":
                 if not args.id:
@@ -1193,7 +1159,7 @@ def cmd_task(args: argparse.Namespace) -> int:
                       f"{args.id or '<id>'}`"))
         return 1
     ok(f"{args.action}: {said(task['id'])}  {said(task['title'])}  "
-       f"[{_short_state(task['state'])}]  {said(task.get('owner')) or 'unclaimed'}")
+       f"[{short_state(task['state'])}]  {said(task.get('owner')) or 'unclaimed'}")
 
     # THE BOARD AND THE ROSTER MOVE TOGETHER. Claiming a task is already the
     # statement «I am doing this»; making the agent say it twice is how the two
@@ -1223,7 +1189,7 @@ def _describe_task(task: dict[str, Any], *, as_json: bool = False) -> int:
         print(json.dumps(task, indent=2))
         return 0
     heading(f"{said(task['id'])}  {said(task['title'])}")
-    print(f"  {'state':<12} {_short_state(task['state'])}")
+    print(f"  {'state':<12} {short_state(task['state'])}")
     print(f"  {'owner':<12} {said(task.get('owner')) or dim('unclaimed')}")
     print(f"  {'proposed by':<12} {said(task.get('created_by')) or '?'}")
     if task.get("room"):
@@ -1236,7 +1202,7 @@ def _describe_task(task: dict[str, Any], *, as_json: bool = False) -> int:
         print(f"\n  {said(task['detail'])}")
     if task.get("owner"):
         print(dim(f"\n  {said(task['owner'])} has it — say so before taking it over"))
-    elif _short_state(task["state"]) in ("completed", "canceled"):
+    elif short_state(task["state"]) in ("completed", "canceled"):
         print(dim("\n  finished work: propose a new task rather than reopening it"))
     else:
         print(dim(f"\n  yours to take: collab task claim --id {said(task['id'])}"))
@@ -1327,7 +1293,7 @@ def _describe_batch(figures: dict[str, Any] | None, *, action: str = "status") -
         for task in holding:
             owner = said(task.get("owner")) or dim("unclaimed")
             print(f"    {said(task['id'])}  {said(task['title'])}  "
-                  f"[{_short_state(task['state'])}]  {owner}")
+                  f"[{short_state(task['state'])}]  {owner}")
     elif pct is not None:
         print(dim("\n  nothing outstanding"))
     if action == "close":

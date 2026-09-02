@@ -49,6 +49,7 @@ from ..protocol import (
     bounded_meta,
     clip,
     new_id,
+    short_state,
 )
 from .auth import BearerBackend, RateLimiter, new_secret
 from .card import build_agent_card
@@ -481,8 +482,7 @@ def create_app(
             if existing["state"] in FINISHED_STATES:
                 raise HTTPException(
                     status_code=409,
-                    detail=(f"{task_id} is "
-                            f"{existing['state'].replace('TASK_STATE_', '').lower()}"
+                    detail=(f"{task_id} is {short_state(existing['state'])}"
                             " — propose a new task rather than reopening it"),
                 )
             if action == "claim":

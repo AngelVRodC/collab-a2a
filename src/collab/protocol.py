@@ -42,6 +42,18 @@ KIND_ACTIVITY = "activity"
 ALL_KINDS = frozenset({KIND_CHAT, KIND_TASK, KIND_HELLO, KIND_PRESENCE,
                        KIND_FILE, KIND_SYSTEM})
 
+
+def short_state(state: str) -> str:
+    """«TASK_STATE_WORKING» -> «working», the way a task state is shown.
+
+    Here rather than in the caller because there are four of them — the CLI,
+    the viewer, the TUI and the hub's own task line — and they each had their
+    own copy of this. A renderer that cannot import the CLI writes the strip
+    again, so the helper has to live where every renderer already looks.
+    """
+    return str(state).replace("TASK_STATE_", "").lower()
+
+
 #: Files are shared out of band rather than pasted as text, so binaries and
 #: build artifacts never have to be squeezed through a chat message.
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -290,7 +302,7 @@ class Envelope:
             return f"[{self.body.get('state', 'activity')}] {self.sender}: {said}"
         if self.kind == KIND_TASK:
             b = self.body
-            state = str(b.get("state", "")).replace("TASK_STATE_", "").lower()
+            state = short_state(b.get("state", ""))
             owner = f" ({b['owner']})" if b.get("owner") else ""
             return (
                 f"[task {b.get('id', '?')}] {self.sender} {b.get('action', '')}: "

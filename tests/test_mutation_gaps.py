@@ -19,18 +19,6 @@ from collab import config, themes
 from collab.client import tui
 
 
-@pytest.fixture
-def folder(tmp_path, monkeypatch):
-    d = tmp_path / "themes"
-    d.mkdir()
-    monkeypatch.setattr(themes, "user_themes_dir", lambda home=None: d)
-    themes._MD_CACHE.clear()
-    tui._THEME_CACHE.clear()
-    yield d
-    themes._MD_CACHE.clear()
-    tui._THEME_CACHE.clear()
-
-
 def write(d, name, text):
     (d / f"{name}.md").write_text(text, encoding="utf-8")
     themes._MD_CACHE.clear()
